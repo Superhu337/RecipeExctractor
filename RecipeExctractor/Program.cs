@@ -76,6 +76,8 @@ namespace RecipeExtractor
                 Directory.CreateDirectory(iconsFolder);
 
                 List<FactorioRecipe> recipes = ExtractRecipesAndResources(factorioDataPath, iconsFolder);
+                // --- ВЫЗОВ ПРОВЕРКИ НЕДОСТАЮЩИХ ИКОНОК И РЕЦЕПТОВ ---
+                ValidateRecipesAndIcons(recipes, exeFolder);
 
                 string outputPath = Path.Combine(exeFolder, "recipes.json");
                 string jsonOutput = JsonConvert.SerializeObject(recipes, Formatting.Indented);
@@ -95,6 +97,88 @@ namespace RecipeExtractor
             {
                 Console.WriteLine($"\nПроизошла ошибка: {ex.Message}");
             }
+        }
+        /// <summary>
+        /// Выполняет валидацию извлеченных рецептов и иконок, выводя детальный отчёт в консоль.
+        /// </summary>
+        /// <param name="recipes">Список извлеченных рецептов</param>
+        /// <param name="baseDir">Базовая директория приложения, где находится папка 'icons'</param>
+        private static void ValidateRecipesAndIcons(List<FactorioRecipe> recipes, string baseDir)
+        {
+            Console.WriteLine("\n--------------------------------------------------");
+            Console.WriteLine("=== Проверка целостности рецептов и иконок ===");
+            Console.WriteLine("--------------------------------------------------");
+
+            int missingIconsCount = 0;
+            int missingFilesCount = 0;
+            int noProductsCount = 0;
+            int invalidAmountCount = 0;
+
+            foreach (var recipe in recipes)
+            {
+                // 1. Проверка структуры рецепта
+                if (recipe.Products == null || recipe.Products.Count == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[ОШИБКА] Рецепт '{recipe.Name}' не содержит выходных продуктов!");
+                    Console.ResetColor();
+                    noProductsCount++;
+                }
+
+                foreach (var product in recipe.Products ?? new List<FactorioItemAmount>())
+                {
+                    if (product.Amount <= 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"[ПРЕДУПРЕЖДЕНИЕ] В рецепте '{recipe.Name}' продукт '{product.Name}' имеет количество <= 0 ({product.Amount})");
+                        Console.ResetColor();
+                        invalidAmountCount++;
+                    }
+                }
+
+                // 2. Проверка назначения и существования иконок
+                if (string.IsNullOrWhiteSpace(recipe.Icon))
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"[НЕТ ИКОНКИ] Для рецепта/ресурса '{recipe.Name}' не удалось найти иконку.");
+                    Console.ResetColor();
+                    missingIconsCount++;
+                }
+                else
+                {
+                    string fullIconPath = Path.Combine(baseDir, recipe.Icon.Replace('/', Path.DirectorySeparatorChar));
+                    if (!File.Exists(fullIconPath))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[БИТАЯ ССЫЛКА] Иконка указана ('{recipe.Icon}'), но файл отсутствует: {fullIconPath}");
+                        Console.ResetColor();
+                        missingFilesCount++;
+                    }
+                }
+            }
+
+            Console.WriteLine("\n--- Итоги проверки ---");
+            Console.WriteLine($"Всего записей проверено: {recipes.Count}");
+
+            if (missingIconsCount == 0 && missingFilesCount == 0 && noProductsCount == 0 && invalidAmountCount == 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("Все рецепты и иконки полностью корректны!");
+                Console.ResetColor();
+            }
+            else
+            {
+                if (missingIconsCount > 0)
+                    Console.WriteLine($"- Пропущено иконок: {missingIconsCount}");
+                if (missingFilesCount > 0)
+                    Console.WriteLine($"- Отсутствующих файлов иконок (битых ссылок): {missingFilesCount}");
+                if (noProductsCount > 0)
+                    Console.WriteLine($"- Рецептов без продуктов: {noProductsCount}");
+                if (invalidAmountCount > 0)
+                    Console.WriteLine($"- Продуктов с нулевым/отрицательным количеством: {invalidAmountCount}");
+            }
+
+            Console.WriteLine("--------------------------------------------------\n");
         }
 
         private static List<FactorioRecipe> ExtractRecipesAndResources(string factorioDataPath, string iconsFolder)
