@@ -10,6 +10,9 @@
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="NLua" Version="1.7.9" />
+	<TrimmerRootAssembly Include="NLua" />
+	<TrimmerRootAssembly Include="Newtonsoft.Json" />
+	<TrimmerRootAssembly Include="RecipeExctractor" />
   </ItemGroup>
 
 </Project>

@@ -1,13 +1,16 @@
-﻿using System;
+﻿using Newtonsoft.Json;
+using NLua;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
-using NLua;
-using Newtonsoft.Json;
 using Formatting = Newtonsoft.Json.Formatting;
+
 
 namespace RecipeExtractor
 {
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
     public class FactorioItemAmount
     {
         [JsonProperty("name")]
@@ -17,12 +20,13 @@ namespace RecipeExtractor
         public string Type { get; set; } = "item";
 
         [JsonProperty("amount")]
-        public double Amount { get; set; }
+        public double Amount { get; set; } = 1;
 
         [JsonProperty("probability", NullValueHandling = NullValueHandling.Ignore)]
         public double? Probability { get; set; }
     }
 
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
     public class FactorioRecipe
     {
         [JsonProperty("name")]
@@ -43,6 +47,7 @@ namespace RecipeExtractor
         [JsonProperty("products")]
         public List<FactorioItemAmount> Products { get; set; } = new();
     }
+
 
     class Program
     {
@@ -543,28 +548,42 @@ namespace RecipeExtractor
         }
 
         private static FactorioItemAmount ParseItemAmount(LuaTable itemTable)
+{
+    var item = new FactorioItemAmount();
+
+    // ВАРИАНТ 1: Формат словаря { name = "processing-unit", amount = 250, type = "item" }
+    if (itemTable["name"] != null)
+    {
+        item.Name = itemTable["name"].ToString()!;
+        item.Type = itemTable["type"]?.ToString() ?? "item";
+
+        if (itemTable["amount"] != null)
         {
-            var item = new FactorioItemAmount();
-
-            if (itemTable["name"] != null)
-            {
-                item.Name = itemTable["name"].ToString()!;
-                item.Type = itemTable["type"]?.ToString() ?? "item";
-                item.Amount = Convert.ToDouble(itemTable["amount"] ?? itemTable["amount_min"] ?? 1);
-
-                if (itemTable["probability"] != null)
-                {
-                    item.Probability = Convert.ToDouble(itemTable["probability"]);
-                }
-            }
-            else if (itemTable[1] != null)
-            {
-                item.Name = itemTable[1].ToString()!;
-                item.Type = "item";
-                item.Amount = itemTable[2] != null ? Convert.ToDouble(itemTable[2]) : 1;
-            }
-
-            return item;
+            item.Amount = Convert.ToDouble(itemTable["amount"]);
         }
+        else if (itemTable["amount_min"] != null)
+        {
+            item.Amount = Convert.ToDouble(itemTable["amount_min"]);
+        }
+
+        if (itemTable["probability"] != null)
+        {
+            item.Probability = Convert.ToDouble(itemTable["probability"]);
+        }
+    }
+    // ВАРИАНТ 2: Формат позиционного массива { "processing-unit", 250 }
+    else if (itemTable[1] != null)
+    {
+        item.Name = itemTable[1].ToString()!;
+        item.Type = "item";
+        
+        if (itemTable[2] != null)
+        {
+            item.Amount = Convert.ToDouble(itemTable[2]);
+        }
+    }
+
+    return item;
+}
     }
 }
