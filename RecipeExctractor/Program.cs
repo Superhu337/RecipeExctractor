@@ -1,27 +1,26 @@
-﻿using Newtonsoft.Json;
-using NLua;
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Xml;
 using System.Diagnostics;
+using System.IO;
+using NLua;
+using Newtonsoft.Json;
+using Formatting = Newtonsoft.Json.Formatting;
+
 namespace RecipeExtractor
 {
-    // --- Модели данных для JSON ---
-
     public class FactorioItemAmount
     {
         [JsonProperty("name")]
         public string Name { get; set; } = string.Empty;
 
         [JsonProperty("type")]
-        public string Type { get; set; } = "item"; // "item" или "fluid"
+        public string Type { get; set; } = "item";
 
         [JsonProperty("amount")]
         public double Amount { get; set; }
 
         [JsonProperty("probability", NullValueHandling = NullValueHandling.Ignore)]
-        public double? Probability { get; set; } // Для вероятностного выхода
+        public double? Probability { get; set; }
     }
 
     public class FactorioRecipe
@@ -33,7 +32,7 @@ namespace RecipeExtractor
         public string Category { get; set; } = "crafting";
 
         [JsonProperty("energy_required")]
-        public double EnergyRequired { get; set; } = 0.5; // Время крафта в секундах (по умолчанию 0.5)
+        public double EnergyRequired { get; set; } = 0.5;
 
         [JsonProperty("icon")]
         public string Icon { get; set; } = string.Empty;
@@ -49,7 +48,7 @@ namespace RecipeExtractor
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("=== Factorio Recipe Extractor ===");
+            Console.WriteLine("=== Factorio Recipe & Resource Extractor ===");
 
             string factorioDataPath = @"C:\Program Files (x86)\Steam\steamapps\common\Factorio\data";
 
@@ -67,17 +66,19 @@ namespace RecipeExtractor
 
             try
             {
-                List<FactorioRecipe> recipes = ExtractRecipes(factorioDataPath);
-
                 string exeFolder = AppContext.BaseDirectory;
+                string iconsFolder = Path.Combine(exeFolder, "icons");
+                Directory.CreateDirectory(iconsFolder);
+
+                List<FactorioRecipe> recipes = ExtractRecipesAndResources(factorioDataPath, iconsFolder);
+
                 string outputPath = Path.Combine(exeFolder, "recipes.json");
-                string jsonOutput = JsonConvert.SerializeObject(recipes, Newtonsoft.Json.Formatting.Indented);
+                string jsonOutput = JsonConvert.SerializeObject(recipes, Formatting.Indented);
                 File.WriteAllText(outputPath, jsonOutput);
 
-                Console.WriteLine($"\nУспешно! Извлечено рецептов: {recipes.Count}");
+                Console.WriteLine($"\nУспешно! Извлечено рецептов и ресурсов: {recipes.Count}");
                 Console.WriteLine($"Файл сохранен в: {outputPath}");
 
-                // //---Автоматическое открытие JSON файла-- -
                 Console.WriteLine("Открываем JSON файл...");
                 Process.Start(new ProcessStartInfo
                 {
@@ -89,57 +90,156 @@ namespace RecipeExtractor
             {
                 Console.WriteLine($"\nПроизошла ошибка: {ex.Message}");
             }
-        
         }
 
-        private static List<FactorioRecipe> ExtractRecipes(string factorioDataPath)
+        private static List<FactorioRecipe> ExtractRecipesAndResources(string factorioDataPath, string iconsFolder)
         {
             var recipes = new List<FactorioRecipe>();
+            int iconsCopied = 0;
 
             using (Lua lua = new Lua())
             {
-                // Инициализируем минимальное окружение Lua для Factorio
-                lua.DoString(@"
-                    data = { raw = { recipe = {} } }
-                    data.extend = function(self, other)
+                string corePath = Path.Combine(factorioDataPath, "core", "lualib", "?.lua").Replace('\\', '/');
+                string basePath = Path.Combine(factorioDataPath, "base", "?.lua").Replace('\\', '/');
+
+                lua.DoString($@"
+                    package.path = package.path .. ';{corePath};{basePath}'
+
+                    data = {{ raw = {{}} }}
+
+                    function data:extend(other)
+                        if type(other) ~= 'table' then return end
                         for _, obj in ipairs(other) do
-                            if obj.type then
-                                data.raw[obj.type] = data.raw[obj.type] or {}
+                            if type(obj) == 'table' and obj.type and obj.name then
+                                data.raw[obj.type] = data.raw[obj.type] or {{}}
                                 data.raw[obj.type][obj.name] = obj
                             end
                         end
                     end
+
+                    defines = {{
+                        difficulty_settings = {{ recipe_difficulty = {{ normal = 0, expensive = 1 }} }},
+                        direction = {{ north = 0, east = 2, south = 4, west = 6 }},
+                        render_mode = {{ game = 1 }}
+                    }}
+
+                    util = util or {{}}
+                    util.table = util.table or {{}}
+                    util.table.deepcopy = function(t) return t end
+
+                    local old_require = require
+                    require = function(mod)
+                        local success, result = pcall(old_require, mod)
+                        if success then
+                            return result
+                        else
+                            return setmetatable({{}}, {{
+                                __index = function(_, k)
+                                    return function() return {{}} end
+                                end
+                            }})
+                        end
+                    end
                 ");
 
-                // Загружаем прототипы рецептов ванильной игры
-                string recipeLuaPath = Path.Combine(factorioDataPath, "base", "prototypes", "recipe.lua");
-                if (!File.Exists(recipeLuaPath))
+                // 1. Загружаем ядро
+                RunLuaFileIfExists(lua, Path.Combine(factorioDataPath, "core", "lualib", "util.lua"));
+                RunLuaFileIfExists(lua, Path.Combine(factorioDataPath, "core", "data.lua"));
+
+                // 2. Сканируем все файлы из prototypes
+                string basePrototypes = Path.Combine(factorioDataPath, "base", "prototypes");
+                if (Directory.Exists(basePrototypes))
                 {
-                    throw new FileNotFoundException($"Файл рецептов не найден: {recipeLuaPath}");
+                    foreach (var file in Directory.GetFiles(basePrototypes, "*.lua", SearchOption.AllDirectories))
+                    {
+                        RunLuaFileIfExists(lua, file);
+                    }
                 }
 
-                lua.DoFile(recipeLuaPath);
+                // 3. Загружаем главный файл base
+                RunLuaFileIfExists(lua, Path.Combine(factorioDataPath, "base", "data.lua"));
 
-                // Получаем таблицу data.raw.recipe
-                LuaTable recipeTable = lua.GetTable("data.raw.recipe");
-
-                foreach (var key in recipeTable.Keys)
+                // 4. Извлекаем обычные рецепты
+                if (lua.GetTable("data.raw.recipe") is LuaTable recipeTable)
                 {
-                    if (recipeTable[key] is LuaTable recipeData)
+                    foreach (var key in recipeTable.Keys)
                     {
-                        var parsedRecipe = ParseRecipe(recipeData);
-                        if (parsedRecipe != null)
+                        if (recipeTable[key] is LuaTable recipeData)
                         {
-                            recipes.Add(parsedRecipe);
+                            var parsedRecipe = ParseRecipe(recipeData, lua, factorioDataPath, iconsFolder, ref iconsCopied);
+                            if (parsedRecipe != null)
+                            {
+                                recipes.Add(parsedRecipe);
+                            }
                         }
                     }
                 }
+
+                // 5. Извлекаем ресурсы из data.raw.resource
+                if (lua.GetTable("data.raw.resource") is LuaTable resourceTable)
+                {
+                    foreach (var key in resourceTable.Keys)
+                    {
+                        if (resourceTable[key] is LuaTable resourceData)
+                        {
+                            var parsedResource = ParseResourceAsRecipe(resourceData, lua, factorioDataPath, iconsFolder, ref iconsCopied);
+                            if (parsedResource != null && !recipes.Exists(r => r.Name == parsedResource.Name))
+                            {
+                                recipes.Add(parsedResource);
+                            }
+                        }
+                    }
+                }
+
+                // 6. Дополнительно сканируем data.raw.item для поиска пропущенных руд
+                if (lua.GetTable("data.raw.item") is LuaTable itemTable)
+                {
+                    foreach (var key in itemTable.Keys)
+                    {
+                        string itemName = key?.ToString() ?? "";
+                        if (itemName.EndsWith("-ore") || itemName.Contains("raw-"))
+                        {
+                            string virtualRecipeName = $"mining-{itemName}";
+                            if (!recipes.Exists(r => r.Name == virtualRecipeName || r.Name == itemName))
+                            {
+                                if (itemTable[key] is LuaTable itemData)
+                                {
+                                    var oreRecipe = CreateRecipeFromItem(itemData, lua, factorioDataPath, iconsFolder, ref iconsCopied);
+                                    if (oreRecipe != null)
+                                    {
+                                        recipes.Add(oreRecipe);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 7. Добавляем насосные ресурсы (вода, нефть)
+                AddFluidResourceIfMissing(recipes, "water", "fluid", lua, factorioDataPath, iconsFolder, ref iconsCopied);
+                AddFluidResourceIfMissing(recipes, "crude-oil", "fluid", lua, factorioDataPath, iconsFolder, ref iconsCopied);
             }
 
+            Console.WriteLine($"Успешно скопировано иконок: {iconsCopied}");
             return recipes;
         }
 
-        private static FactorioRecipe? ParseRecipe(LuaTable raw)
+        private static void RunLuaFileIfExists(Lua lua, string filePath)
+        {
+            if (File.Exists(filePath))
+            {
+                try
+                {
+                    lua.DoFile(filePath);
+                }
+                catch
+                {
+                    // Игнорируем ошибки специфичных скриптов Lua
+                }
+            }
+        }
+
+        private static FactorioRecipe? ParseRecipe(LuaTable raw, Lua lua, string factorioDataPath, string iconsFolder, ref int iconsCopied)
         {
             string name = raw["name"]?.ToString() ?? "";
             if (string.IsNullOrEmpty(name)) return null;
@@ -147,22 +247,18 @@ namespace RecipeExtractor
             var recipe = new FactorioRecipe
             {
                 Name = name,
-                Category = raw["category"]?.ToString() ?? "crafting",
-                Icon = raw["icon"]?.ToString() ?? ""
+                Category = raw["category"]?.ToString() ?? "crafting"
             };
 
-            // Время выполнения (Energy Required)
             if (raw["energy_required"] != null)
             {
                 recipe.EnergyRequired = Convert.ToDouble(raw["energy_required"]);
             }
 
-            // В Factorio рецепты могут быть описаны напрямую или вложены в "normal"/"expensive"
             LuaTable? ingredientsTable = raw["ingredients"] as LuaTable;
             LuaTable? resultsTable = raw["results"] as LuaTable;
             string? singleResult = raw["result"] as string;
 
-            // Если свойства сложены в 'normal' режим
             if (ingredientsTable == null && raw["normal"] is LuaTable normalTable)
             {
                 ingredientsTable = normalTable["ingredients"] as LuaTable;
@@ -174,7 +270,6 @@ namespace RecipeExtractor
                 }
             }
 
-            // --- Парсим Ингредиенты (Входы) ---
             if (ingredientsTable != null)
             {
                 foreach (var value in ingredientsTable.Values)
@@ -186,8 +281,6 @@ namespace RecipeExtractor
                 }
             }
 
-            // --- Парсим Выходы (Результаты) ---
-            // 1. Несколько выходов (таблица results)
             if (resultsTable != null)
             {
                 foreach (var value in resultsTable.Values)
@@ -198,15 +291,9 @@ namespace RecipeExtractor
                     }
                 }
             }
-            // 2. Один выход (короткая запись через result и result_count)
             else if (!string.IsNullOrEmpty(singleResult))
             {
-                double count = 1;
-                if (raw["result_count"] != null)
-                {
-                    count = Convert.ToDouble(raw["result_count"]);
-                }
-
+                double count = Convert.ToDouble(raw["result_count"] ?? 1);
                 recipe.Products.Add(new FactorioItemAmount
                 {
                     Name = singleResult,
@@ -214,27 +301,236 @@ namespace RecipeExtractor
                     Amount = count
                 });
             }
+            else
+            {
+                recipe.Products.Add(new FactorioItemAmount
+                {
+                    Name = name,
+                    Type = "item",
+                    Amount = 1
+                });
+            }
+
+            string? rawIconPath = ExtractIconPath(raw) ?? GetFallbackIconFromPrototypes(recipe.Products, lua, name);
+            CopyAndAssignIcon(recipe, rawIconPath, factorioDataPath, iconsFolder, ref iconsCopied);
 
             return recipe;
+        }
+
+        private static FactorioRecipe? ParseResourceAsRecipe(LuaTable raw, Lua lua, string factorioDataPath, string iconsFolder, ref int iconsCopied)
+        {
+            string name = raw["name"]?.ToString() ?? "";
+            if (string.IsNullOrEmpty(name)) return null;
+
+            LuaTable? minable = raw["minable"] as LuaTable;
+
+            var recipe = new FactorioRecipe
+            {
+                Name = $"mining-{name}",
+                Category = "mining",
+                EnergyRequired = minable != null ? Convert.ToDouble(minable["mining_time"] ?? 1.0) : 1.0,
+                Ingredients = new List<FactorioItemAmount>()
+            };
+
+            string resultType = "item";
+
+            if (minable != null)
+            {
+                if (minable["results"] is LuaTable resultsTable)
+                {
+                    foreach (var value in resultsTable.Values)
+                    {
+                        if (value is LuaTable prod)
+                        {
+                            recipe.Products.Add(ParseItemAmount(prod));
+                        }
+                    }
+                }
+                else if (minable["result"] != null)
+                {
+                    string resultName = minable["result"].ToString()!;
+                    double count = Convert.ToDouble(minable["count"] ?? 1);
+                    recipe.Products.Add(new FactorioItemAmount
+                    {
+                        Name = resultName,
+                        Type = "item",
+                        Amount = count
+                    });
+                }
+            }
+
+            if (recipe.Products.Count == 0)
+            {
+                if (name == "crude-oil") resultType = "fluid";
+
+                recipe.Products.Add(new FactorioItemAmount
+                {
+                    Name = name,
+                    Type = resultType,
+                    Amount = 1
+                });
+            }
+
+            string? rawIconPath = ExtractIconPath(raw) ?? GetFallbackIconFromPrototypes(recipe.Products, lua, name);
+            CopyAndAssignIcon(recipe, rawIconPath, factorioDataPath, iconsFolder, ref iconsCopied);
+
+            return recipe;
+        }
+
+        private static FactorioRecipe? CreateRecipeFromItem(LuaTable itemTable, Lua lua, string factorioDataPath, string iconsFolder, ref int iconsCopied)
+        {
+            string name = itemTable["name"]?.ToString() ?? "";
+            if (string.IsNullOrEmpty(name)) return null;
+
+            var recipe = new FactorioRecipe
+            {
+                Name = $"mining-{name}",
+                Category = "mining",
+                EnergyRequired = 1.0,
+                Ingredients = new List<FactorioItemAmount>(),
+                Products = new List<FactorioItemAmount>
+                {
+                    new FactorioItemAmount { Name = name, Type = "item", Amount = 1 }
+                }
+            };
+
+            string? rawIconPath = ExtractIconPath(itemTable) ?? GetFallbackIconFromPrototypes(recipe.Products, lua, name);
+            CopyAndAssignIcon(recipe, rawIconPath, factorioDataPath, iconsFolder, ref iconsCopied);
+
+            return recipe;
+        }
+
+        private static void AddFluidResourceIfMissing(List<FactorioRecipe> recipes, string fluidName, string fluidType, Lua lua, string factorioDataPath, string iconsFolder, ref int iconsCopied)
+        {
+            string recipeName = $"pumping-{fluidName}";
+            if (recipes.Exists(r => r.Name == recipeName || r.Name == fluidName)) return;
+
+            var recipe = new FactorioRecipe
+            {
+                Name = recipeName,
+                Category = "pumping",
+                EnergyRequired = 1.0,
+                Ingredients = new List<FactorioItemAmount>(),
+                Products = new List<FactorioItemAmount>
+                {
+                    new FactorioItemAmount
+                    {
+                        Name = fluidName,
+                        Type = fluidType,
+                        Amount = 100
+                    }
+                }
+            };
+
+            string? rawIconPath = GetFallbackIconFromPrototypes(recipe.Products, lua, fluidName);
+            CopyAndAssignIcon(recipe, rawIconPath, factorioDataPath, iconsFolder, ref iconsCopied);
+
+            recipes.Add(recipe);
+        }
+
+        private static void CopyAndAssignIcon(FactorioRecipe recipe, string? rawIconPath, string factorioDataPath, string iconsFolder, ref int iconsCopied)
+        {
+            if (string.IsNullOrEmpty(rawIconPath)) return;
+
+            string fullSourcePath = ResolveFactorioPath(rawIconPath, factorioDataPath);
+
+            if (File.Exists(fullSourcePath))
+            {
+                string targetFileName = $"{recipe.Name}{Path.GetExtension(fullSourcePath)}";
+                string targetFilePath = Path.Combine(iconsFolder, targetFileName);
+
+                File.Copy(fullSourcePath, targetFilePath, true);
+                recipe.Icon = Path.Combine("icons", targetFileName).Replace('\\', '/');
+                iconsCopied++;
+            }
+        }
+
+        private static string? ExtractIconPath(LuaTable raw)
+        {
+            if (raw["icon"] != null)
+            {
+                return raw["icon"].ToString();
+            }
+
+            if (raw["icons"] is LuaTable iconsTable)
+            {
+                foreach (var val in iconsTable.Values)
+                {
+                    if (val is LuaTable iconEntry && iconEntry["icon"] != null)
+                    {
+                        return iconEntry["icon"].ToString();
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static string? GetFallbackIconFromPrototypes(List<FactorioItemAmount> products, Lua lua, string fallbackName)
+        {
+            List<string> searchNames = new();
+
+            foreach (var p in products)
+            {
+                if (!string.IsNullOrEmpty(p.Name)) searchNames.Add(p.Name);
+            }
+            if (!searchNames.Contains(fallbackName)) searchNames.Add(fallbackName);
+
+            string[] possibleTypes = {
+                "item", "fluid", "resource", "tool", "ammo", "capsule",
+                "module", "armor", "gun", "item-with-entity-data", "mining-tool",
+                "offshore-pump", "pipe", "container", "autoplace-control"
+            };
+
+            foreach (var name in searchNames)
+            {
+                foreach (var type in possibleTypes)
+                {
+                    if (lua.GetTable($"data.raw.{type}.{name}") is LuaTable prototypeTable)
+                    {
+                        string? iconPath = ExtractIconPath(prototypeTable);
+                        if (!string.IsNullOrEmpty(iconPath))
+                        {
+                            return iconPath;
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static string ResolveFactorioPath(string factorioPath, string factorioDataPath)
+        {
+            if (factorioPath.StartsWith("__") && factorioPath.Contains("__"))
+            {
+                int closeIndex = factorioPath.IndexOf("__", 2);
+                if (closeIndex > 2)
+                {
+                    string modName = factorioPath.Substring(2, closeIndex - 2);
+                    string relativePath = factorioPath.Substring(closeIndex + 2).TrimStart('/', '\\');
+                    return Path.Combine(factorioDataPath, modName, relativePath);
+                }
+            }
+
+            return Path.Combine(factorioDataPath, factorioPath.TrimStart('/', '\\'));
         }
 
         private static FactorioItemAmount ParseItemAmount(LuaTable itemTable)
         {
             var item = new FactorioItemAmount();
 
-            // Сложная запись: {type="item", name="iron-plate", amount=2, probability=0.8}
             if (itemTable["name"] != null)
             {
                 item.Name = itemTable["name"].ToString()!;
                 item.Type = itemTable["type"]?.ToString() ?? "item";
-                item.Amount = Convert.ToDouble(itemTable["amount"] ?? 1);
+                item.Amount = Convert.ToDouble(itemTable["amount"] ?? itemTable["amount_min"] ?? 1);
 
                 if (itemTable["probability"] != null)
                 {
                     item.Probability = Convert.ToDouble(itemTable["probability"]);
                 }
             }
-            // Короткая запись: {"iron-plate", 2}
             else if (itemTable[1] != null)
             {
                 item.Name = itemTable[1].ToString()!;
