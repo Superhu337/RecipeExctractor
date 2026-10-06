@@ -69,20 +69,21 @@ namespace RecipeExtractor
             {
                 List<FactorioRecipe> recipes = ExtractRecipes(factorioDataPath);
 
-                string outputPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "recipes.json");
+                string exeFolder = AppContext.BaseDirectory;
+                string outputPath = Path.Combine(exeFolder, "recipes.json");
                 string jsonOutput = JsonConvert.SerializeObject(recipes, Newtonsoft.Json.Formatting.Indented);
                 File.WriteAllText(outputPath, jsonOutput);
 
                 Console.WriteLine($"\nУспешно! Извлечено рецептов: {recipes.Count}");
                 Console.WriteLine($"Файл сохранен в: {outputPath}");
 
-                // --- Автоматическое открытие JSON файла ---
-                //Console.WriteLine("Открываем JSON файл...");
-                //Process.Start(new ProcessStartInfo
-                //{
-                //    FileName = outputPath,
-                //    UseShellExecute = true
-                //});
+               // //---Автоматическое открытие JSON файла-- -
+               //Console.WriteLine("Открываем JSON файл...");
+               // Process.Start(new ProcessStartInfo
+               // {
+               //     FileName = outputPath,
+               //     UseShellExecute = true
+               // });
             }
             catch (Exception ex)
             {
