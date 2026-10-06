@@ -191,9 +191,27 @@ namespace RecipeExtractor
                     }
                 }
 
-                // 6. Дополнительно сканируем data.raw.item для поиска пропущенных руд
+                // 6. Гарантированная поддержка основных сырьевых ресурсов (stone, coal, ore и т.д.)
+                string[] basicResources = { "stone", "coal", "iron-ore", "copper-ore", "uranium-ore" };
                 if (lua.GetTable("data.raw.item") is LuaTable itemTable)
                 {
+                    foreach (var resName in basicResources)
+                    {
+                        string virtualName = $"mining-{resName}";
+                        if (!recipes.Exists(r => r.Name == virtualName || r.Name == resName))
+                        {
+                            if (itemTable[resName] is LuaTable itemData)
+                            {
+                                var basicRecipe = CreateRecipeFromItem(itemData, lua, factorioDataPath, iconsFolder, ref iconsCopied);
+                                if (basicRecipe != null)
+                                {
+                                    recipes.Add(basicRecipe);
+                                }
+                            }
+                        }
+                    }
+
+                    // Сканирование прочих руд по паттернам
                     foreach (var key in itemTable.Keys)
                     {
                         string itemName = key?.ToString() ?? "";
@@ -476,10 +494,18 @@ namespace RecipeExtractor
             }
             if (!searchNames.Contains(fallbackName)) searchNames.Add(fallbackName);
 
+            // Если передано mining-stone, также ищем просто stone
+            if (fallbackName.StartsWith("mining-"))
+            {
+                string rawName = fallbackName.Replace("mining-", "");
+                if (!searchNames.Contains(rawName)) searchNames.Add(rawName);
+            }
+
             string[] possibleTypes = {
                 "item", "fluid", "resource", "tool", "ammo", "capsule",
                 "module", "armor", "gun", "item-with-entity-data", "mining-tool",
-                "offshore-pump", "pipe", "container", "autoplace-control"
+                "offshore-pump", "pipe", "container", "autoplace-control",
+                "entity", "simple-entity"
             };
 
             foreach (var name in searchNames)
