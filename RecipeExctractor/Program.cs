@@ -7,9 +7,80 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Text;
 
 namespace RecipeExtractor
 {
+    // ==========================================
+    // КЛАСС ДЛЯ ЗАПИСИ ОТЛАДКИ В ФАЙЛ (СОРТИРОВКА: ОШИБКИ СВЕРХУ)
+    // ==========================================
+    public static class DebugLogger
+    {
+        private class LogEntry
+        {
+            public string Message { get; set; } = string.Empty;
+            public bool IsError { get; set; }
+        }
+
+        private static readonly List<LogEntry> _logs = new List<LogEntry>();
+        private static readonly string LogFilePath = Path.Combine(AppContext.BaseDirectory, "debug_log.txt");
+
+        public static void Log(string message, bool isError = false)
+        {
+            lock (_logs)
+            {
+                _logs.Add(new LogEntry { Message = message, IsError = isError });
+            }
+        }
+
+        public static void Save()
+        {
+            try
+            {
+                // Сортируем: сначала ошибки (true), потом обычная информация (false)
+                var sortedLogs = _logs.OrderByDescending(l => l.IsError).ToList();
+
+                using (var writer = new StreamWriter(LogFilePath, false, Encoding.UTF8))
+                {
+                    writer.WriteLine($"=== Debug Log Generated: {DateTime.Now} ===");
+                    writer.WriteLine(new string('=', 60));
+
+                    bool wroteErrors = false;
+                    bool wroteInfo = false;
+
+                    foreach (var log in sortedLogs)
+                    {
+                        // Добавляем заголовки разделов при переходе от ошибок к информации
+                        if (log.IsError && !wroteErrors)
+                        {
+                            writer.WriteLine("\n🚨 ОШИБКИ И ПРОБЛЕМЫ:");
+                            writer.WriteLine(new string('-', 60));
+                            wroteErrors = true;
+                        }
+                        else if (!log.IsError && wroteErrors && !wroteInfo)
+                        {
+                            writer.WriteLine("\n📝 ОБЫЧНЫЙ ЛОГ ВЫПОЛНЕНИЯ:");
+                            writer.WriteLine(new string('-', 60));
+                            wroteInfo = true;
+                        }
+
+                        writer.WriteLine(log.Message);
+                    }
+
+                    if (_logs.Count == 0)
+                    {
+                        writer.WriteLine("\n(Лог пуст, ошибок не обнаружено)");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Не удалось сохранить лог-файл: {ex.Message}");
+            }
+        }
+    }
+    // ==========================================
+
     public class FactorioItemAmount
     {
         [JsonProperty("name")]
@@ -49,16 +120,13 @@ namespace RecipeExtractor
         public string? Mod { get; set; }
     }
 
-    /// <summary>
-    /// Информация о моде Factorio
-    /// </summary>
     public class FactorioMod
     {
         public string Name { get; set; } = string.Empty;
         public string Version { get; set; } = string.Empty;
         public string Title { get; set; } = string.Empty;
-        public string PhysicalPath { get; set; } = string.Empty;  // Путь к распакованной папке или zip
-        public string DataPath { get; set; } = string.Empty;      // Путь к папке data внутри мода
+        public string PhysicalPath { get; set; } = string.Empty;
+        public string DataPath { get; set; } = string.Empty;
         public bool IsZip { get; set; }
         public List<string> Dependencies { get; set; } = new();
         public List<string> OptionalDependencies { get; set; } = new();
@@ -69,6 +137,8 @@ namespace RecipeExtractor
     {
         static void Main(string[] args)
         {
+            DebugLogger.Log("Program started.");
+
             Console.WriteLine("=== Factorio Recipe & Resource Extractor (with Mods) ===");
 
             string factorioDataPath = @"C:\Program Files (x86)\Steam\steamapps\common\Factorio\data";
@@ -81,10 +151,13 @@ namespace RecipeExtractor
             if (!Directory.Exists(factorioDataPath))
             {
                 Console.WriteLine("Ошибка: Указанный путь не существует.");
+                DebugLogger.Log($"FATAL: Путь не существует: {factorioDataPath}", true);
+                Console.WriteLine("\nНажмите Enter для выхода...");
+                Console.ReadLine();
+                DebugLogger.Save(); // Сохраняем лог перед выходом
                 return;
             }
 
-            // Путь к папке модов
             string defaultModsPath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "Factorio", "mods");
@@ -108,6 +181,7 @@ namespace RecipeExtractor
                 else
                 {
                     Console.WriteLine("Указанная папка не существует. Используем путь по умолчанию.");
+                    DebugLogger.Log($"User input path invalid, using default: {defaultModsPath}", true);
                 }
             }
 
@@ -127,7 +201,7 @@ namespace RecipeExtractor
                 if (!string.IsNullOrEmpty(modsPath) && Directory.Exists(modsPath))
                 {
                     mods = DiscoverMods(modsPath, tempModsFolder);
-                    Console.WriteLine($" Найдено модов: {mods.Count}");
+                    Console.WriteLine($"✅ Найдено модов: {mods.Count}");
                     foreach (var mod in mods)
                     {
                         Console.WriteLine($"   • {mod.Name} v{mod.Version} ({(mod.IsZip ? "zip" : "folder")})");
@@ -147,24 +221,30 @@ namespace RecipeExtractor
                 string jsonOutput = JsonConvert.SerializeObject(recipes, Formatting.Indented);
                 File.WriteAllText(outputPath, jsonOutput);
 
-                Console.WriteLine($"\n Успешно! Извлечено записей: {recipes.Count}");
+                Console.WriteLine($"\n✅ Успешно! Извлечено записей: {recipes.Count}");
                 Console.WriteLine($"💾 Файл сохранен в: {outputPath}");
+                Console.WriteLine($"📝 Подробный лог (ошибки сверху) сохранен в: {Path.Combine(exeFolder, "debug_log.txt")}");
 
-                // Очистка временной папки
                 try { Directory.Delete(tempModsFolder, true); } catch { }
 
                 Process.Start(new ProcessStartInfo { FileName = outputPath, UseShellExecute = true });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"\n Произошла ошибка: {ex.Message}");
+                Console.WriteLine($"\n❌ Произошла ошибка: {ex.Message}");
+                DebugLogger.Log($"FATAL ERROR: {ex.Message}\n{ex.StackTrace}", true);
                 Console.WriteLine(ex.StackTrace);
             }
+            finally
+            {
+                // Гарантированно сохраняем лог в конце, даже если была ошибка
+                DebugLogger.Save();
+            }
+
+            Console.WriteLine("\nНажмите Enter для выхода...");
+            Console.ReadLine();
         }
 
-        /// <summary>
-        /// Находит все моды в указанной папке, распаковывает zip-архивы и читает info.json
-        /// </summary>
         private static List<FactorioMod> DiscoverMods(string modsPath, string tempFolder)
         {
             var mods = new List<FactorioMod>();
@@ -191,17 +271,14 @@ namespace RecipeExtractor
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($" Не удалось обработать мод {Path.GetFileName(entry)}: {ex.Message}");
+                    Console.WriteLine($"⚠️ Не удалось обработать мод {Path.GetFileName(entry)}: {ex.Message}");
+                    DebugLogger.Log($"ERROR processing mod {entry}: {ex.Message}", true);
                 }
             }
 
-            // Фильтруем несовместимые и сортируем по зависимостям
             return SortModsByDependencies(FilterIncompatible(mods));
         }
 
-        /// <summary>
-        /// Распаковывает zip-мод во временную папку и читает info.json
-        /// </summary>
         private static FactorioMod? ExtractAndReadZipMod(string zipPath, string tempFolder)
         {
             string modName = Path.GetFileNameWithoutExtension(zipPath);
@@ -213,24 +290,22 @@ namespace RecipeExtractor
             }
             catch (Exception ex)
             {
-                Console.WriteLine($" Не удалось распаковать {modName}: {ex.Message}");
+                Console.WriteLine($"⚠️ Не удалось распаковать {modName}: {ex.Message}");
+                DebugLogger.Log($"ERROR extracting {modName}: {ex.Message}", true);
                 return null;
             }
 
-            // Ищем info.json (может быть в корне или в подпапке)
             string? infoPath = FindInfoJson(extractPath);
             if (infoPath == null)
             {
-                Console.WriteLine($" Мод {modName} не содержит info.json");
+                Console.WriteLine($"⚠️ Мод {modName} не содержит info.json");
+                DebugLogger.Log($"ERROR: Mod {modName} missing info.json", true);
                 return null;
             }
 
             return ReadModInfo(infoPath, Path.GetDirectoryName(infoPath)!, isZip: true);
         }
 
-        /// <summary>
-        /// Читает info.json из распакованной папки мода
-        /// </summary>
         private static FactorioMod? ReadFolderMod(string folderPath)
         {
             string? infoPath = FindInfoJson(folderPath);
@@ -239,15 +314,11 @@ namespace RecipeExtractor
             return ReadModInfo(infoPath, folderPath, isZip: false);
         }
 
-        /// <summary>
-        /// Ищет info.json в папке (в корне или в первой подпапке)
-        /// </summary>
         private static string? FindInfoJson(string folderPath)
         {
             string directPath = Path.Combine(folderPath, "info.json");
             if (File.Exists(directPath)) return directPath;
 
-            // Ищем в подпапках (zip часто содержит подпапку с именем мода)
             foreach (var subDir in Directory.GetDirectories(folderPath))
             {
                 string subInfoPath = Path.Combine(subDir, "info.json");
@@ -257,9 +328,6 @@ namespace RecipeExtractor
             return null;
         }
 
-        /// <summary>
-        /// Читает info.json и возвращает объект FactorioMod
-        /// </summary>
         private static FactorioMod? ReadModInfo(string infoPath, string dataRootPath, bool isZip)
         {
             try
@@ -268,15 +336,12 @@ namespace RecipeExtractor
                 var info = JObject.Parse(jsonContent);
 
                 string modName = info["name"]?.ToString() ?? Path.GetFileNameWithoutExtension(infoPath);
-
-                // Определяем PhysicalPath — это папка, содержащая info.json
                 string physicalPath = Path.GetDirectoryName(infoPath)!;
 
-                // DataPath — папка data/ внутри мода, ИЛИ сам корень мода, если data/ нет
                 string dataPath = Path.Combine(physicalPath, "data");
                 if (!Directory.Exists(dataPath))
                 {
-                    dataPath = physicalPath; // Используем корень мода как data
+                    dataPath = physicalPath;
                 }
 
                 var mod = new FactorioMod
@@ -289,7 +354,6 @@ namespace RecipeExtractor
                     IsZip = isZip
                 };
 
-                // Парсим зависимости
                 if (info["dependencies"] is JArray deps)
                 {
                     foreach (var dep in deps)
@@ -307,7 +371,7 @@ namespace RecipeExtractor
                         }
                         else if (depStr.StartsWith("~") || (depStr.StartsWith("(") && depStr.EndsWith(")")))
                         {
-                            // Скрытые/опциональные — пропускаем
+                            // Пропускаем скрытые зависимости
                         }
                         else
                         {
@@ -322,14 +386,12 @@ namespace RecipeExtractor
             }
             catch (Exception ex)
             {
-                Console.WriteLine($" Ошибка чтения info.json: {ex.Message}");
+                Console.WriteLine($"⚠️ Ошибка чтения info.json: {ex.Message}");
+                DebugLogger.Log($"ERROR reading info.json at {infoPath}: {ex.Message}", true);
                 return null;
             }
         }
 
-        /// <summary>
-        /// Удаляет моды, которые помечены как несовместимые с другими загруженными модами
-        /// </summary>
         private static List<FactorioMod> FilterIncompatible(List<FactorioMod> mods)
         {
             var modNames = new HashSet<string>(mods.Select(m => m.Name));
@@ -342,7 +404,8 @@ namespace RecipeExtractor
                 {
                     if (modNames.Contains(inc))
                     {
-                        Console.WriteLine($" Мод {mod.Name} несовместим с {inc}, пропускаем");
+                        Console.WriteLine($"⚠️ Мод {mod.Name} несовместим с {inc}, пропускаем");
+                        DebugLogger.Log($"INCOMPATIBLE: Mod {mod.Name} skipped due to conflict with {inc}", true);
                         incompatible = true;
                         break;
                     }
@@ -353,9 +416,6 @@ namespace RecipeExtractor
             return result;
         }
 
-        /// <summary>
-        /// Сортирует моды так, чтобы зависимости загружались раньше зависимых
-        /// </summary>
         private static List<FactorioMod> SortModsByDependencies(List<FactorioMod> mods)
         {
             var modByName = mods.ToDictionary(m => m.Name);
@@ -368,7 +428,8 @@ namespace RecipeExtractor
                 if (visited.Contains(mod.Name)) return;
                 if (inProgress.Contains(mod.Name))
                 {
-                    Console.WriteLine($" Циклическая зависимость у {mod.Name}");
+                    Console.WriteLine($"⚠️ Циклическая зависимость у {mod.Name}");
+                    DebugLogger.Log($"WARNING: Cyclic dependency detected for {mod.Name}", true);
                     return;
                 }
 
@@ -387,7 +448,6 @@ namespace RecipeExtractor
                 sorted.Add(mod);
             }
 
-            // base всегда первый
             if (modByName.TryGetValue("base", out var baseMod))
             {
                 Visit(baseMod);
@@ -435,11 +495,10 @@ namespace RecipeExtractor
                 }
             }
 
-            Console.WriteLine($"\n Всего проверено записей: {recipes.Count}");
+            Console.WriteLine($"\n📊 Всего проверено записей: {recipes.Count}");
 
-            // Статистика по модам
             var recipesByMod = recipes.GroupBy(r => r.Mod ?? "base").ToDictionary(g => g.Key, g => g.Count());
-            Console.WriteLine("\n Рецепты по источникам:");
+            Console.WriteLine("\n📦 Рецепты по источникам:");
             foreach (var kvp in recipesByMod.OrderByDescending(x => x.Value))
             {
                 Console.WriteLine($"   • {kvp.Key}: {kvp.Value}");
@@ -448,7 +507,7 @@ namespace RecipeExtractor
             if (missingIcons.Count > 0)
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"\n Рецепты БЕЗ ИКОНОК ({missingIcons.Count}):");
+                Console.WriteLine($"\n⚠️ Рецепты БЕЗ ИКОНОК ({missingIcons.Count}):");
                 Console.ResetColor();
                 foreach (var name in missingIcons.Take(20))
                     Console.WriteLine($"   • {name}");
@@ -459,7 +518,7 @@ namespace RecipeExtractor
             if (missingFiles.Count > 0)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\n БИТЫЕ ССЫЛКИ на иконки ({missingFiles.Count}):");
+                Console.WriteLine($"\n❌ БИТЫЕ ССЫЛКИ на иконки ({missingFiles.Count}):");
                 Console.ResetColor();
                 foreach (var item in missingFiles.Take(10))
                 {
@@ -471,7 +530,7 @@ namespace RecipeExtractor
             if (noProducts.Count > 0)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\n Рецепты БЕЗ ПРОДУКТОВ ({noProducts.Count}):");
+                Console.WriteLine($"\n❌ Рецепты БЕЗ ПРОДУКТОВ ({noProducts.Count}):");
                 Console.ResetColor();
                 foreach (var name in noProducts)
                     Console.WriteLine($"   • {name}");
@@ -480,7 +539,7 @@ namespace RecipeExtractor
             if (invalidAmounts.Count > 0)
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"\n Продукты с НЕКОРРЕКТНЫМ количеством ({invalidAmounts.Count}):");
+                Console.WriteLine($"\n⚠️ Продукты с НЕКОРРЕКТНЫМ количеством ({invalidAmounts.Count}):");
                 Console.ResetColor();
                 foreach (var item in invalidAmounts.Take(15))
                     Console.WriteLine($"   • {item.RecipeName} → {item.ProductName} (кол-во: {item.Amount})");
@@ -492,13 +551,13 @@ namespace RecipeExtractor
             if (totalIssues == 0)
             {
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine(" ВСЕ РЕЦЕПТЫ И ИКОНКИ ПОЛНОСТЬЮ КОРРЕКТНЫ!");
+                Console.WriteLine("✅ ВСЕ РЕЦЕПТЫ И ИКОНКИ ПОЛНОСТЬЮ КОРРЕКТНЫ!");
                 Console.ResetColor();
             }
             else
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($" ИТОГО ПРОБЛЕМ: {totalIssues}");
+                Console.WriteLine($"📋 ИТОГО ПРОБЛЕМ: {totalIssues}");
                 Console.ResetColor();
                 Console.WriteLine($"   • Пропущено иконок: {missingIcons.Count}");
                 Console.WriteLine($"   • Битых ссылок: {missingFiles.Count}");
@@ -516,16 +575,13 @@ namespace RecipeExtractor
 
             using (Lua lua = new Lua())
             {
-                // 1. Настраиваем окружение Factorio
                 lua.DoString(@"
-                    -- Подавляем ВСЕ виды вывода из модов
                     log = function(msg) end
                     error = function(msg) end
                     print = function(...) end
                     io.write = function(...) end
                     io.write = function(...) return io.stdout end
                     
-                    -- Подавляем системные вызовы (могут вызывать 'system cannot find drive')
                     os.execute = function(cmd) return true, 'exit', 0 end
                     io.popen = function(cmd) return nil end
                     os.rename = function() return true end
@@ -559,36 +615,30 @@ namespace RecipeExtractor
                     current_mod = nil
                 ");
 
-                // 2. Экранируем пути для Lua
                 string coreLuaPath = Path.Combine(factorioDataPath, "core", "lualib", "?.lua").Replace('\\', '/');
                 string baseLuaPath = Path.Combine(factorioDataPath, "base", "?.lua").Replace('\\', '/');
                 string baseFolderPath = factorioDataPath.Replace('\\', '/');
 
-                // 3. Формируем package.path по частям
                 lua.DoString($"package.path = package.path .. ';{coreLuaPath};{baseLuaPath}'");
 
-                // Добавляем пути модов
                 foreach (var mod in mods)
                 {
                     string modPath = mod.PhysicalPath.Replace('\\', '/');
                     lua.DoString($"package.path = package.path .. ';{modPath}/?.lua'");
                 }
 
-                // 4. Создаем таблицу путей модов для поиска __modname__/...
                 var modPathsList = new List<string> { baseFolderPath };
                 foreach (var mod in mods)
                 {
                     modPathsList.Add(mod.PhysicalPath.Replace('\\', '/'));
                 }
 
-                // Формируем Lua-таблицу путей
                 lua.DoString("mod_search_paths = {}");
                 foreach (var path in modPathsList)
                 {
                     lua.DoString($"table.insert(mod_search_paths, '{path}')");
                 }
 
-                // 5. Переопределяем require
                 lua.DoString(@"
                     local old_require = require
                     require = function(modname)
@@ -616,17 +666,16 @@ namespace RecipeExtractor
                     end
                 ");
 
-                // 6. Загружаем util.lua
                 try
                 {
                     lua.DoFile(Path.Combine(factorioDataPath, "core", "lualib", "util.lua"));
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($" Предупреждение при загрузке util.lua: {ex.Message}");
+                    Console.WriteLine($"⚠️ Предупреждение при загрузке util.lua: {ex.Message}");
+                    DebugLogger.Log($"WARNING loading util.lua: {ex.Message}", true);
                 }
 
-                // 7. Функция поиска иконки
                 lua.DoString(@"
                     function get_best_icon(name)
                         for type_name, type_table in pairs(data.raw) do
@@ -648,7 +697,6 @@ namespace RecipeExtractor
                     end
                 ");
 
-                // 8. Загружаем файлы базовой игры
                 Console.WriteLine("Загрузка файлов базовой игры...");
                 string prototypesPath = Path.Combine(factorioDataPath, "base", "prototypes");
 
@@ -673,13 +721,13 @@ namespace RecipeExtractor
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($" Ошибка при загрузке {fileName}: {ex.Message}");
+                            Console.WriteLine($"⚠️ Ошибка при загрузке {fileName}: {ex.Message}");
+                            DebugLogger.Log($"ERROR loading base file {fileName}: {ex.Message}", true);
                         }
                     }
                 }
-                Console.WriteLine($" Загружено базовых файлов: {loadedCount}");
+                Console.WriteLine($"✅ Загружено базовых файлов: {loadedCount}");
 
-                // Сканируем остальные файлы базовой игры
                 if (Directory.Exists(prototypesPath))
                 {
                     foreach (var file in Directory.GetFiles(prototypesPath, "*.lua", SearchOption.AllDirectories))
@@ -698,8 +746,6 @@ namespace RecipeExtractor
                     }
                 }
 
-                // 9. Загружаем моды
-                // 9. Загружаем моды
                 if (mods.Count > 0)
                 {
                     Console.WriteLine($"\nЗагрузка {mods.Count} модов...");
@@ -708,43 +754,28 @@ namespace RecipeExtractor
 
                     foreach (var mod in mods)
                     {
-                        Console.WriteLine($"\n🔍 Обработка мода: {mod.Name}");
-                        Console.WriteLine($"   PhysicalPath: {mod.PhysicalPath}");
-                        Console.WriteLine($"   DataPath: {mod.DataPath}");
-                        Console.WriteLine($"   PhysicalPath существует: {Directory.Exists(mod.PhysicalPath)}");
-                        Console.WriteLine($"   DataPath существует: {Directory.Exists(mod.DataPath)}");
+                        DebugLogger.Log($"\n[MOD] Processing: {mod.Name}");
+                        DebugLogger.Log($"  PhysicalPath: {mod.PhysicalPath}");
+                        DebugLogger.Log($"  DataPath: {mod.DataPath}");
 
-                        // Выводим содержимое папок
-                        if (Directory.Exists(mod.PhysicalPath))
-                        {
-                            var files = Directory.GetFiles(mod.PhysicalPath, "*.lua", SearchOption.AllDirectories);
-                            Console.WriteLine($"   Lua-файлов в PhysicalPath: {files.Length}");
-                            foreach (var f in files.Take(5))
-                            {
-                                Console.WriteLine($"     - {Path.GetFileName(f)}");
-                            }
-                        }
-
-                        if (Directory.Exists(mod.DataPath) && mod.DataPath != mod.PhysicalPath)
-                        {
-                            var files = Directory.GetFiles(mod.DataPath, "*.lua", SearchOption.AllDirectories);
-                            Console.WriteLine($"   Lua-файлов в DataPath: {files.Length}");
-                        }
-
-                        // Проверяем, есть ли хоть какие-то lua-файлы в моде
                         bool hasLuaFiles = false;
                         if (Directory.Exists(mod.DataPath))
                         {
-                            hasLuaFiles = Directory.GetFiles(mod.DataPath, "*.lua", SearchOption.AllDirectories).Length > 0;
+                            var files = Directory.GetFiles(mod.DataPath, "*.lua", SearchOption.AllDirectories);
+                            DebugLogger.Log($"  Lua files in DataPath: {files.Length}");
+                            hasLuaFiles = files.Length > 0;
                         }
                         if (!hasLuaFiles && Directory.Exists(mod.PhysicalPath))
                         {
-                            hasLuaFiles = Directory.GetFiles(mod.PhysicalPath, "*.lua", SearchOption.TopDirectoryOnly).Length > 0;
+                            var files = Directory.GetFiles(mod.PhysicalPath, "*.lua", SearchOption.TopDirectoryOnly);
+                            DebugLogger.Log($"  Lua files in PhysicalPath: {files.Length}");
+                            hasLuaFiles = files.Length > 0;
                         }
 
                         if (!hasLuaFiles)
                         {
-                            Console.WriteLine($" Мод {mod.Name}: не найдено lua-файлов");
+                            Console.WriteLine($"⚠️ Мод {mod.Name}: не найдено lua-файлов");
+                            DebugLogger.Log($"  STATUS: FAILED (no lua files found)", true);
                             modsFailed++;
                             continue;
                         }
@@ -755,19 +786,20 @@ namespace RecipeExtractor
                         {
                             LoadModDataFiles(lua, mod);
                             modsLoaded++;
-                            Console.WriteLine($" Мод {mod.Name} загружен");
+                            Console.WriteLine($"✅ Мод {mod.Name} загружен");
+                            DebugLogger.Log($"  STATUS: SUCCESS");
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($" Ошибка загрузки мода {mod.Name}: {ex.Message}");
+                            Console.WriteLine($"⚠️ Ошибка загрузки мода {mod.Name}: {ex.Message}");
+                            DebugLogger.Log($"  STATUS: FAILED ({ex.Message})", true);
                             modsFailed++;
                         }
                     }
 
-                    Console.WriteLine($"\n Итого модов: загружено {modsLoaded}, ошибок {modsFailed}");
+                    Console.WriteLine($"\n📦 Итого модов: загружено {modsLoaded}, ошибок {modsFailed}");
                 }
 
-                // 10. Извлекаем рецепты
                 LuaTable rawObj = (lua["data"] as LuaTable)?["raw"] as LuaTable;
 
                 if (rawObj != null)
@@ -804,32 +836,26 @@ namespace RecipeExtractor
                 }
                 else
                 {
-                    Console.WriteLine(" Не удалось получить таблицу data.raw из Lua.");
+                    Console.WriteLine("⚠️ Не удалось получить таблицу data.raw из Lua.");
+                    DebugLogger.Log("FATAL: Failed to get data.raw table from Lua", true);
                 }
             }
 
-            Console.WriteLine($"\n Скопировано иконок: {iconsCopied}");
+            Console.WriteLine($"\n✅ Скопировано иконок: {iconsCopied}");
             return recipes;
         }
 
-        /// <summary>
-        /// Загружает все lua-файлы мода в правильном порядке
-        /// </summary>
         private static void LoadModDataFiles(Lua lua, FactorioMod mod)
         {
-            // Собираем все папки для поиска lua-файлов
             var searchPaths = new List<string>();
 
-            // Сначала папка data/ (если существует и отличается от корня)
             if (Directory.Exists(mod.DataPath) && mod.DataPath != mod.PhysicalPath)
             {
                 searchPaths.Add(mod.DataPath);
             }
 
-            // Всегда добавляем корень мода
             searchPaths.Add(mod.PhysicalPath);
 
-            // Ищем data.lua во всех возможных местах
             string? dataLua = null;
             foreach (var path in searchPaths)
             {
@@ -841,13 +867,11 @@ namespace RecipeExtractor
                 }
             }
 
-            // Загружаем data.lua первым (если есть)
             if (dataLua != null)
             {
                 try { lua.DoFile(dataLua); } catch { }
             }
 
-            // Загружаем остальные lua-файлы из всех папок
             var loadedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (dataLua != null) loadedFiles.Add(dataLua);
 
@@ -861,7 +885,6 @@ namespace RecipeExtractor
                     loadedFiles.Add(file);
 
                     string fileName = Path.GetFileName(file).ToLower();
-                    // Пропускаем служебные файлы
                     if (fileName.Contains("locale") ||
                         fileName.Contains("changelog") ||
                         fileName.Contains("settings") ||
@@ -874,9 +897,6 @@ namespace RecipeExtractor
             }
         }
 
-        /// <summary>
-        /// Определяет, из какого мода пришел прототип
-        /// </summary>
         private static string? DetectModFromIcon(string? iconPath, List<FactorioMod> mods, string factorioDataPath)
         {
             if (string.IsNullOrEmpty(iconPath)) return null;
@@ -892,7 +912,6 @@ namespace RecipeExtractor
                 }
             }
 
-            // Проверяем по полному пути
             string fullPath = ResolveFactorioPath(iconPath, factorioDataPath, mods);
             foreach (var mod in mods)
             {
@@ -1012,11 +1031,24 @@ namespace RecipeExtractor
                 });
             }
 
-            
-            // Поиск иконки
-            string? iconPath = ExtractIconPath(raw) ?? ExtractIconPath(targetTable);
+            // === ДЕТАЛЬНЫЙ ДЕБАГ РЕЦЕПТОВ (в файл) ===
+            DebugLogger.Log($"\n[RECIPE] {name}");
+            DebugLogger.Log($"  Raw icon: {raw["icon"]}");
 
-            
+            if (raw["icons"] is LuaTable iconsTable)
+            {
+                DebugLogger.Log($"  Icons array found:");
+                foreach (var val in iconsTable.Values)
+                {
+                    if (val is LuaTable iconEntry)
+                    {
+                        DebugLogger.Log($"    - icon: {iconEntry["icon"]}, size: {iconEntry["icon_size"]}");
+                    }
+                }
+            }
+
+            string? iconPath = ExtractIconPath(raw) ?? ExtractIconPath(targetTable);
+            DebugLogger.Log($"  Extracted icon: {iconPath ?? "NULL"}");
 
             if (string.IsNullOrEmpty(iconPath))
             {
@@ -1025,22 +1057,38 @@ namespace RecipeExtractor
                 {
                     var res = getIconFunc.Call(name);
                     iconPath = res?.FirstOrDefault()?.ToString();
-
-                    
+                    DebugLogger.Log($"  Search by name '{name}': {iconPath ?? "NULL"}");
 
                     if (string.IsNullOrEmpty(iconPath) && recipe.Products.Count > 0)
                     {
                         res = getIconFunc.Call(recipe.Products[0].Name);
                         iconPath = res?.FirstOrDefault()?.ToString();
-
-                        
+                        DebugLogger.Log($"  Search by product '{recipe.Products[0].Name}': {iconPath ?? "NULL"}");
                     }
                 }
             }
 
-            
+            DebugLogger.Log($"  Final Icon Path: {iconPath ?? "NULL"}");
 
-            // Определяем мод
+            if (!string.IsNullOrEmpty(iconPath))
+            {
+                string fullPath = ResolveFactorioPath(iconPath, factorioDataPath, mods);
+                DebugLogger.Log($"  Resolved Full Path: {fullPath}");
+
+                bool exists = File.Exists(fullPath);
+                DebugLogger.Log($"  File Exists: {exists}");
+
+                if (!exists)
+                {
+                    DebugLogger.Log($"  ERROR: Icon file not found at resolved path!", true);
+                }
+            }
+            else
+            {
+                DebugLogger.Log($"  ERROR: No icon path could be determined!", true);
+            }
+            // ===========================================
+
             recipe.Mod = DetectModFromIcon(iconPath, mods, factorioDataPath);
 
             CopyAndAssignIcon(recipe, iconPath, factorioDataPath, iconsFolder, mods, ref iconsCopied);
@@ -1208,7 +1256,6 @@ namespace RecipeExtractor
 
             if (File.Exists(fullSourcePath))
             {
-                // Используем имя мода в имени файла, чтобы избежать конфликтов
                 string modPrefix = string.IsNullOrEmpty(recipe.Mod) || recipe.Mod == "base" ? "" : $"{recipe.Mod}_";
                 string targetFileName = $"{modPrefix}{recipe.Name}{Path.GetExtension(fullSourcePath)}";
                 string targetFilePath = Path.Combine(iconsFolder, targetFileName);
@@ -1219,7 +1266,10 @@ namespace RecipeExtractor
                     recipe.Icon = Path.Combine("icons", targetFileName).Replace('\\', '/');
                     iconsCopied++;
                 }
-                catch (IOException) { }
+                catch (IOException ex)
+                {
+                    DebugLogger.Log($"  ERROR copying icon {targetFileName}: {ex.Message}", true);
+                }
             }
         }
 
@@ -1233,21 +1283,17 @@ namespace RecipeExtractor
                     string modName = factorioPath.Substring(2, closeIndex - 2);
                     string relativePath = factorioPath.Substring(closeIndex + 2).TrimStart('/', '\\');
 
-                    // Если это base мод — ищем в data/base
                     if (modName == "base")
                     {
                         return Path.GetFullPath(Path.Combine(factorioDataPath, "base", relativePath));
                     }
 
-                    // Ищем мод в списке загруженных модов
                     var mod = mods.FirstOrDefault(m => m.Name == modName);
                     if (mod != null)
                     {
-                        // PhysicalPath уже указывает на папку мода, не добавляем имя мода повторно
                         return Path.GetFullPath(Path.Combine(mod.PhysicalPath, relativePath));
                     }
 
-                    // Фолбэк: ищем в папке data
                     return Path.GetFullPath(Path.Combine(factorioDataPath, modName, relativePath));
                 }
             }
