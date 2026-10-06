@@ -77,13 +77,13 @@ namespace RecipeExtractor
                 Console.WriteLine($"\nУспешно! Извлечено рецептов: {recipes.Count}");
                 Console.WriteLine($"Файл сохранен в: {outputPath}");
 
-               // //---Автоматическое открытие JSON файла-- -
-               //Console.WriteLine("Открываем JSON файл...");
-               // Process.Start(new ProcessStartInfo
-               // {
-               //     FileName = outputPath,
-               //     UseShellExecute = true
-               // });
+                // //---Автоматическое открытие JSON файла-- -
+                Console.WriteLine("Открываем JSON файл...");
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = outputPath,
+                    UseShellExecute = true
+                });
             }
             catch (Exception ex)
             {
