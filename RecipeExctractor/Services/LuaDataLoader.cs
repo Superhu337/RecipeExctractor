@@ -22,14 +22,13 @@ namespace RecipeExtractor.Services
 
         private void InitializeLuaEnvironment()
         {
-            // Создаем таблицы Lua для эмуляции окружения Factorio
             var dataTable = new Table(_luaScript);
             var dataRawTable = new Table(_luaScript);
-            dataTable["raw"] = dataRawTable;
-            _luaScript.Globals["data"] = dataTable;
+            dataTable.Set("raw", DynValue.NewTable(dataRawTable));
 
-            // Эмулируем функцию require (возвращает пустую таблицу, чтобы избежать ошибок загрузки зависимостей)
-            // и функцию data.extend для корректного сбора данных
+            // Используем метод Set для гарантированной типизации
+            _luaScript.Globals.Set("data", DynValue.NewTable(dataTable));
+
             _luaScript.DoString(@"
                 function require(module)
                     return {}
@@ -107,7 +106,6 @@ namespace RecipeExtractor.Services
                 }
                 catch (Exception ex)
                 {
-                    // Игнорируем ошибки в отдельных файлах модов, чтобы продолжить загрузку остальных
                     Console.WriteLine($"[Предупреждение] Ошибка загрузки {file}: {ex.Message}");
                 }
             }
@@ -116,19 +114,24 @@ namespace RecipeExtractor.Services
         public List<Item> GetItems()
         {
             var items = new List<Item>();
-            var dataTable = _luaScript.Globals["data"] as Table;
-            if (dataTable == null) return items;
 
-            var dataRaw = dataTable["raw"] as Table;
-            if (dataRaw == null) return items;
+            // Используем Get() для гарантированного получения DynValue
+            var dataDyn = _luaScript.Globals.Get("data");
+            if (dataDyn.Type != DataType.Table) return items;
+            var dataTable = dataDyn.Table;
+
+            var dataRawDyn = dataTable.Get("raw");
+            if (dataRawDyn.Type != DataType.Table) return items;
+            var dataRaw = dataRawDyn.Table;
 
             var itemTypes = new[] { "item", "item-with-entity-data", "ammo", "armor", "capsule", "gun", "module", "tool", "fluid", "entity" };
 
             foreach (var type in itemTypes)
             {
-                var typeTable = dataRaw[type] as Table;
-                if (typeTable != null)
+                var typeTableDyn = dataRaw.Get(type);
+                if (typeTableDyn.Type == DataType.Table)
                 {
+                    var typeTable = typeTableDyn.Table;
                     foreach (var kvp in typeTable.Pairs)
                     {
                         var item = ConvertToItem(kvp.Value, type);
@@ -146,15 +149,19 @@ namespace RecipeExtractor.Services
         public List<Recipe> GetRecipes()
         {
             var recipes = new List<Recipe>();
-            var dataTable = _luaScript.Globals["data"] as Table;
-            if (dataTable == null) return recipes;
 
-            var dataRaw = dataTable["raw"] as Table;
-            if (dataRaw == null) return recipes;
+            var dataDyn = _luaScript.Globals.Get("data");
+            if (dataDyn.Type != DataType.Table) return recipes;
+            var dataTable = dataDyn.Table;
 
-            var recipeTable = dataRaw["recipe"] as Table;
-            if (recipeTable != null)
+            var dataRawDyn = dataTable.Get("raw");
+            if (dataRawDyn.Type != DataType.Table) return recipes;
+            var dataRaw = dataRawDyn.Table;
+
+            var recipeTableDyn = dataRaw.Get("recipe");
+            if (recipeTableDyn.Type == DataType.Table)
             {
+                var recipeTable = recipeTableDyn.Table;
                 foreach (var kvp in recipeTable.Pairs)
                 {
                     var recipe = ConvertToRecipe(kvp.Value);
@@ -172,17 +179,37 @@ namespace RecipeExtractor.Services
         {
             try
             {
-                var dict = ConvertLuaTableToDictionary(luaItem);
-                if (dict == null) return null;
+                if (luaItem.Type != DataType.Table) return null;
+                var table = luaItem.Table;
 
-                var item = new Item { Type = type, Properties = dict };
+                var item = new Item { Type = type };
 
-                if (dict.TryGetValue("name", out var name)) item.Name = name.ToString() ?? string.Empty;
-                if (dict.TryGetValue("icon", out var icon)) item.IconPath = icon.ToString() ?? string.Empty;
-                if (dict.TryGetValue("icon_size", out var iconSize)) item.IconSize = iconSize.ToString() ?? string.Empty;
-                if (dict.TryGetValue("stack_size", out var stackSize)) item.StackSize = Convert.ToInt32(stackSize);
-                if (dict.TryGetValue("subgroup", out var subgroup)) item.Subgroup = subgroup.ToString() ?? string.Empty;
-                if (dict.TryGetValue("order", out var order)) item.Order = order.ToString() ?? string.Empty;
+                var nameVal = table.Get("name");
+                if (nameVal.Type == DataType.String) item.Name = nameVal.String ?? string.Empty;
+
+                var iconVal = table.Get("icon");
+                if (iconVal.Type == DataType.String) item.IconPath = iconVal.String ?? string.Empty;
+
+                var iconSizeVal = table.Get("icon_size");
+                if (iconSizeVal.Type == DataType.Number) item.IconSize = iconSizeVal.Number.ToString();
+
+                var stackSizeVal = table.Get("stack_size");
+                if (stackSizeVal.Type == DataType.Number) item.StackSize = Convert.ToInt32(stackSizeVal.Number);
+
+                var subgroupVal = table.Get("subgroup");
+                if (subgroupVal.Type == DataType.String) item.Subgroup = subgroupVal.String ?? string.Empty;
+
+                var orderVal = table.Get("order");
+                if (orderVal.Type == DataType.String) item.Order = orderVal.String ?? string.Empty;
+
+                item.Properties = new Dictionary<string, object>();
+                foreach (var kvp in table.Pairs)
+                {
+                    if (kvp.Key.Type == DataType.String)
+                    {
+                        item.Properties[kvp.Key.String!] = ConvertDynValueToObject(kvp.Value);
+                    }
+                }
 
                 return string.IsNullOrEmpty(item.Name) ? null : item;
             }
@@ -196,23 +223,39 @@ namespace RecipeExtractor.Services
         {
             try
             {
-                var dict = ConvertLuaTableToDictionary(luaRecipe);
-                if (dict == null) return null;
+                if (luaRecipe.Type != DataType.Table) return null;
+                var table = luaRecipe.Table;
 
-                var recipe = new Recipe { Properties = dict };
+                var recipe = new Recipe();
 
-                if (dict.TryGetValue("name", out var name)) recipe.Name = name.ToString() ?? string.Empty;
-                if (dict.TryGetValue("category", out var category)) recipe.Category = category.ToString() ?? "crafting";
-                if (dict.TryGetValue("energy_required", out var energy)) recipe.EnergyRequired = Convert.ToDouble(energy);
-                if (dict.TryGetValue("icon", out var icon)) recipe.IconPath = icon.ToString() ?? string.Empty;
-                if (dict.TryGetValue("icon_size", out var iconSize)) recipe.IconSize = iconSize.ToString() ?? string.Empty;
-                if (dict.TryGetValue("enabled", out var enabled)) recipe.Enabled = Convert.ToBoolean(enabled);
+                var nameVal = table.Get("name");
+                if (nameVal.Type == DataType.String) recipe.Name = nameVal.String ?? string.Empty;
 
-                if (luaRecipe.Type == DataType.Table)
+                var categoryVal = table.Get("category");
+                recipe.Category = categoryVal.Type == DataType.String ? (categoryVal.String ?? "crafting") : "crafting";
+
+                var energyVal = table.Get("energy_required");
+                recipe.EnergyRequired = energyVal.Type == DataType.Number ? Convert.ToDouble(energyVal.Number) : 0.5;
+
+                var iconVal = table.Get("icon");
+                if (iconVal.Type == DataType.String) recipe.IconPath = iconVal.String ?? string.Empty;
+
+                var iconSizeVal = table.Get("icon_size");
+                if (iconSizeVal.Type == DataType.Number) recipe.IconSize = iconSizeVal.Number.ToString();
+
+                var enabledVal = table.Get("enabled");
+                recipe.Enabled = enabledVal.Type == DataType.Boolean ? enabledVal.Boolean : true;
+
+                recipe.Ingredients = ConvertIngredients(table.Get("ingredients"));
+                recipe.Results = ConvertResults(table.Get("results"));
+
+                recipe.Properties = new Dictionary<string, object>();
+                foreach (var kvp in table.Pairs)
                 {
-                    var table = luaRecipe.Table;
-                    recipe.Ingredients = ConvertIngredients(table["ingredients"]);
-                    recipe.Results = ConvertResults(table["results"]);
+                    if (kvp.Key.Type == DataType.String)
+                    {
+                        recipe.Properties[kvp.Key.String!] = ConvertDynValueToObject(kvp.Value);
+                    }
                 }
 
                 return string.IsNullOrEmpty(recipe.Name) ? null : recipe;
@@ -226,7 +269,7 @@ namespace RecipeExtractor.Services
         private List<Ingredient> ConvertIngredients(DynValue luaIngredients)
         {
             var ingredients = new List<Ingredient>();
-            if (luaIngredients.Type == DataType.Table)
+            if (luaIngredients != null && luaIngredients.Type == DataType.Table)
             {
                 var table = luaIngredients.Table;
                 foreach (var kvp in table.Pairs)
@@ -237,26 +280,26 @@ namespace RecipeExtractor.Services
                         var itemTable = itemVal.Table;
                         var ingredient = new Ingredient();
 
-                        // Проверяем формат словаря: {name="...", amount=...}
-                        var nameVal = itemTable["name"];
-                        if (nameVal != null && nameVal.Type != DataType.Nil)
+                        var nameVal = itemTable.Get("name");
+                        if (nameVal.Type != DataType.Nil && nameVal.Type != DataType.Void)
                         {
                             ingredient.Name = nameVal.String ?? string.Empty;
-                            var amountVal = itemTable["amount"];
-                            ingredient.Amount = amountVal != null && amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
-                            var typeVal = itemTable["type"];
-                            ingredient.Type = (typeVal != null && typeVal.Type != DataType.Nil ? typeVal.String : "item") ?? "item";
+
+                            var amountVal = itemTable.Get("amount");
+                            ingredient.Amount = amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
+
+                            var typeVal = itemTable.Get("type");
+                            ingredient.Type = typeVal.Type != DataType.Nil ? (typeVal.String ?? "item") : "item";
                         }
                         else
                         {
-                            // Проверяем формат массива: {"iron-plate", 1}
-                            var firstVal = itemTable[1];
-                            var secondVal = itemTable[2];
-                            if (firstVal != null && firstVal.Type != DataType.Nil)
+                            var firstVal = itemTable.Get(DynValue.NewNumber(1));
+                            var secondVal = itemTable.Get(DynValue.NewNumber(2));
+                            if (firstVal.Type != DataType.Nil)
                             {
                                 ingredient.Name = firstVal.String ?? firstVal.ToString() ?? string.Empty;
                             }
-                            if (secondVal != null && secondVal.Type != DataType.Nil)
+                            if (secondVal.Type != DataType.Nil)
                             {
                                 ingredient.Amount = Convert.ToInt32(secondVal.Number);
                             }
@@ -275,7 +318,7 @@ namespace RecipeExtractor.Services
         private List<Result> ConvertResults(DynValue luaResults)
         {
             var results = new List<Result>();
-            if (luaResults.Type == DataType.Table)
+            if (luaResults != null && luaResults.Type == DataType.Table)
             {
                 var table = luaResults.Table;
                 foreach (var kvp in table.Pairs)
@@ -286,29 +329,29 @@ namespace RecipeExtractor.Services
                         var itemTable = itemVal.Table;
                         var result = new Result();
 
-                        var nameVal = itemTable["name"];
-                        if (nameVal != null && nameVal.Type != DataType.Nil)
+                        var nameVal = itemTable.Get("name");
+                        if (nameVal.Type != DataType.Nil && nameVal.Type != DataType.Void)
                         {
                             result.Name = nameVal.String ?? string.Empty;
 
-                            var amountVal = itemTable["amount"];
-                            result.Amount = amountVal != null && amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
+                            var amountVal = itemTable.Get("amount");
+                            result.Amount = amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
 
-                            var probVal = itemTable["probability"];
-                            result.Probability = probVal != null && probVal.Type != DataType.Nil ? Convert.ToDouble(probVal.Number) : 1.0;
+                            var probVal = itemTable.Get("probability");
+                            result.Probability = probVal.Type != DataType.Nil ? Convert.ToDouble(probVal.Number) : 1.0;
 
-                            var typeVal = itemTable["type"];
-                            result.Type = (typeVal != null && typeVal.Type != DataType.Nil ? typeVal.String : "item") ?? "item";
+                            var typeVal = itemTable.Get("type");
+                            result.Type = typeVal.Type != DataType.Nil ? (typeVal.String ?? "item") : "item";
                         }
                         else
                         {
-                            var firstVal = itemTable[1];
-                            var secondVal = itemTable[2];
-                            if (firstVal != null && firstVal.Type != DataType.Nil)
+                            var firstVal = itemTable.Get(DynValue.NewNumber(1));
+                            var secondVal = itemTable.Get(DynValue.NewNumber(2));
+                            if (firstVal.Type != DataType.Nil)
                             {
                                 result.Name = firstVal.String ?? firstVal.ToString() ?? string.Empty;
                             }
-                            if (secondVal != null && secondVal.Type != DataType.Nil)
+                            if (secondVal.Type != DataType.Nil)
                             {
                                 result.Amount = Convert.ToInt32(secondVal.Number);
                             }
@@ -326,24 +369,19 @@ namespace RecipeExtractor.Services
             return results;
         }
 
-        private Dictionary<string, object>? ConvertLuaTableToDictionary(DynValue luaValue)
+        private object? ConvertDynValueToObject(DynValue val)
         {
-            if (luaValue.Type == DataType.Table)
-            {
-                var table = luaValue.Table;
-                var result = new Dictionary<string, object>();
-                foreach (var kvp in table.Pairs)
-                {
-                    var keyObj = kvp.Key.Object;
-                    var valueObj = kvp.Value.Object;
-                    if (keyObj != null)
-                    {
-                        result[keyObj.ToString()!] = valueObj ?? new object();
-                    }
-                }
-                return result;
-            }
-            return null;
+            if (val == null || val.Type == DataType.Nil || val.Type == DataType.Void)
+                return null;
+            if (val.Type == DataType.String)
+                return val.String;
+            if (val.Type == DataType.Number)
+                return val.Number;
+            if (val.Type == DataType.Boolean)
+                return val.Boolean;
+            if (val.Type == DataType.Table)
+                return val.Table;
+            return val.ToObject();
         }
 
         private class ModList
