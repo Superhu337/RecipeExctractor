@@ -11,9 +11,7 @@ using System.Text;
 
 namespace RecipeExtractor
 {
-    // ==========================================
-    // КЛАСС ДЛЯ ЗАПИСИ ОТЛАДКИ В ФАЙЛ (СОРТИРОВКА: ОШИБКИ СВЕРХУ)
-    // ==========================================
+
     public static class DebugLogger
     {
         private class LogEntry
@@ -138,6 +136,7 @@ namespace RecipeExtractor
         static void Main(string[] args)
         {
             DebugLogger.Log("Program started.");
+	    Console.WriteLine("123");
 
             Console.WriteLine("=== Factorio Recipe & Resource Extractor (with Mods) ===");
 
