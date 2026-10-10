@@ -236,7 +236,7 @@ namespace RecipeExtractor.Services
                     {
                         var itemTable = itemVal.Table;
                         var ingredient = new Ingredient();
-                        
+
                         // Проверяем формат словаря: {name="...", amount=...}
                         var nameVal = itemTable["name"];
                         if (nameVal != null && nameVal.Type != DataType.Nil)
@@ -245,4 +245,120 @@ namespace RecipeExtractor.Services
                             var amountVal = itemTable["amount"];
                             ingredient.Amount = amountVal != null && amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
                             var typeVal = itemTable["type"];
-                            ingredient
+                            ingredient.Type = (typeVal != null && typeVal.Type != DataType.Nil ? typeVal.String : "item") ?? "item";
+                        }
+                        else
+                        {
+                            // Проверяем формат массива: {"iron-plate", 1}
+                            var firstVal = itemTable[1];
+                            var secondVal = itemTable[2];
+                            if (firstVal != null && firstVal.Type != DataType.Nil)
+                            {
+                                ingredient.Name = firstVal.String ?? firstVal.ToString() ?? string.Empty;
+                            }
+                            if (secondVal != null && secondVal.Type != DataType.Nil)
+                            {
+                                ingredient.Amount = Convert.ToInt32(secondVal.Number);
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(ingredient.Name))
+                        {
+                            ingredients.Add(ingredient);
+                        }
+                    }
+                }
+            }
+            return ingredients;
+        }
+
+        private List<Result> ConvertResults(DynValue luaResults)
+        {
+            var results = new List<Result>();
+            if (luaResults.Type == DataType.Table)
+            {
+                var table = luaResults.Table;
+                foreach (var kvp in table.Pairs)
+                {
+                    var itemVal = kvp.Value;
+                    if (itemVal.Type == DataType.Table)
+                    {
+                        var itemTable = itemVal.Table;
+                        var result = new Result();
+
+                        var nameVal = itemTable["name"];
+                        if (nameVal != null && nameVal.Type != DataType.Nil)
+                        {
+                            result.Name = nameVal.String ?? string.Empty;
+
+                            var amountVal = itemTable["amount"];
+                            result.Amount = amountVal != null && amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
+
+                            var probVal = itemTable["probability"];
+                            result.Probability = probVal != null && probVal.Type != DataType.Nil ? Convert.ToDouble(probVal.Number) : 1.0;
+
+                            var typeVal = itemTable["type"];
+                            result.Type = (typeVal != null && typeVal.Type != DataType.Nil ? typeVal.String : "item") ?? "item";
+                        }
+                        else
+                        {
+                            var firstVal = itemTable[1];
+                            var secondVal = itemTable[2];
+                            if (firstVal != null && firstVal.Type != DataType.Nil)
+                            {
+                                result.Name = firstVal.String ?? firstVal.ToString() ?? string.Empty;
+                            }
+                            if (secondVal != null && secondVal.Type != DataType.Nil)
+                            {
+                                result.Amount = Convert.ToInt32(secondVal.Number);
+                            }
+                            result.Probability = 1.0;
+                            result.Type = "item";
+                        }
+
+                        if (!string.IsNullOrEmpty(result.Name))
+                        {
+                            results.Add(result);
+                        }
+                    }
+                }
+            }
+            return results;
+        }
+
+        private Dictionary<string, object>? ConvertLuaTableToDictionary(DynValue luaValue)
+        {
+            if (luaValue.Type == DataType.Table)
+            {
+                var table = luaValue.Table;
+                var result = new Dictionary<string, object>();
+                foreach (var kvp in table.Pairs)
+                {
+                    var keyObj = kvp.Key.Object;
+                    var valueObj = kvp.Value.Object;
+                    if (keyObj != null)
+                    {
+                        result[keyObj.ToString()!] = valueObj ?? new object();
+                    }
+                }
+                return result;
+            }
+            return null;
+        }
+
+        private class ModList
+        {
+            [JsonPropertyName("mods")]
+            public List<ModEntry>? Mods { get; set; }
+        }
+
+        private class ModEntry
+        {
+            [JsonPropertyName("name")]
+            public string Name { get; set; } = string.Empty;
+
+            [JsonPropertyName("enabled")]
+            public bool Enabled { get; set; } = true;
+        }
+    }
+}
