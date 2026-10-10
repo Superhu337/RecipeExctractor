@@ -60,5 +60,36 @@ namespace RecipeExtractor.Services
             await File.WriteAllTextAsync(filePath, json);
             Console.WriteLine($"Сводка экспортирована в {filePath}");
         }
+        public async Task ExportValidationReportAsync(ValidationResult result, string filename = "validation_report.json")
+        {
+            var report = new
+            {
+                validationTime = result.ValidationTime,
+                summary = new
+                {
+                    totalItems = result.TotalItems,
+                    totalRecipes = result.TotalRecipes,
+                    errorCount = result.ErrorCount,
+                    warningCount = result.WarningCount,
+                    infoCount = result.InfoCount,
+                    hasErrors = result.HasErrors
+                },
+                issuesByCategory = result.Issues
+                    .GroupBy(i => i.Category.ToString())
+                    .ToDictionary(g => g.Key, g => g.Count()),
+                issuesBySeverity = result.Issues
+                    .GroupBy(i => i.Severity.ToString())
+                    .ToDictionary(g => g.Key, g => g.Count()),
+                issues = result.Issues
+                    .OrderByDescending(i => i.Severity)
+                    .ThenBy(i => i.EntityName)
+                    .ToList()
+            };
+
+            var filePath = Path.Combine(_outputPath, filename);
+            var json = JsonSerializer.Serialize(report, _jsonOptions);
+            await File.WriteAllTextAsync(filePath, json);
+            Console.WriteLine($"Отчёт о валидации сохранён в {filePath}");
+        }
     }
 }

@@ -371,6 +371,11 @@ namespace RecipeExtractor.Services
 
         private object? ConvertDynValueToObject(DynValue val)
         {
+            return ConvertDynValueToObject(val, null);
+        }
+
+        private object? ConvertDynValueToObject(DynValue val, HashSet<Table>? visitedTables)
+        {
             if (val == null || val.Type == DataType.Nil || val.Type == DataType.Void)
                 return null;
             if (val.Type == DataType.String)
@@ -380,8 +385,78 @@ namespace RecipeExtractor.Services
             if (val.Type == DataType.Boolean)
                 return val.Boolean;
             if (val.Type == DataType.Table)
-                return val.Table;
-            return val.ToObject();
+            {
+                var table = val.Table;
+                visitedTables ??= new HashSet<Table>();
+
+                // Защита от циклических ссылок
+                if (visitedTables.Contains(table))
+                    return "[circular reference]";
+                visitedTables.Add(table);
+
+                // Определяем, является ли таблица массивом (последовательные числовые ключи 1..N)
+                bool isArray = true;
+                int maxIndex = 0;
+                int pairCount = 0;
+                foreach (var kvp in table.Pairs)
+                {
+                    pairCount++;
+                    if (kvp.Key.Type == DataType.Number)
+                    {
+                        int idx = (int)kvp.Key.Number;
+                        if (idx < 1) { isArray = false; break; }
+                        if (idx > maxIndex) maxIndex = idx;
+                    }
+                    else
+                    {
+                        isArray = false;
+                        break;
+                    }
+                }
+                // Если количество пар не совпадает с максимальным индексом, это не массив
+                if (isArray && maxIndex != pairCount)
+                    isArray = false;
+
+                if (isArray && pairCount > 0)
+                {
+                    var list = new List<object?>();
+                    for (int i = 1; i <= maxIndex; i++)
+                    {
+                        var itemVal = table.Get(DynValue.NewNumber(i));
+                        list.Add(ConvertDynValueToObject(itemVal, visitedTables));
+                    }
+                    visitedTables.Remove(table);
+                    return list;
+                }
+                else
+                {
+                    var dict = new Dictionary<string, object?>();
+                    foreach (var kvp in table.Pairs)
+                    {
+                        string key;
+                        if (kvp.Key.Type == DataType.String)
+                            key = kvp.Key.String ?? $"[key_{kvp.Key.GetHashCode()}]";
+                        else if (kvp.Key.Type == DataType.Number)
+                            key = kvp.Key.Number.ToString();
+                        else
+                            key = kvp.Key.ToString() ?? $"[key_{kvp.Key.GetHashCode()}]";
+
+                        dict[key] = ConvertDynValueToObject(kvp.Value, visitedTables);
+                    }
+                    visitedTables.Remove(table);
+                    return dict;
+                }
+            }
+            // Для функций, userdata и других типов возвращаем строковое представление
+            try
+            {
+                var strResult = val.CastToString();
+                return strResult ?? val.Type.ToString();
+            }
+            catch
+            {
+                return val.Type.ToString();
+            }
         }
 
         private class ModList

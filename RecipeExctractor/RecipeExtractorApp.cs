@@ -29,7 +29,6 @@ namespace RecipeExtractor
             Console.WriteLine("Запуск RecipeExtractor...");
             Console.WriteLine($"Путь к Factorio: {_factorioPath}");
             Console.WriteLine($"Путь для сохранения: {_outputPath}");
-            Console.WriteLine($"Путь к модам: {_modsPath}");
 
             try
             {
@@ -54,7 +53,8 @@ namespace RecipeExtractor
                 Console.WriteLine("\nИзвлечение иконок...");
                 int iconCount = 0;
                 int totalItems = items.Count;
-                
+                var extractedIconPaths = new HashSet<string>();
+
                 foreach (var item in items)
                 {
                     if (!string.IsNullOrEmpty(item.IconPath))
@@ -63,6 +63,7 @@ namespace RecipeExtractor
                         if (iconPath != null)
                         {
                             item.IconPath = iconPath;
+                            extractedIconPaths.Add(iconPath);
                             iconCount++;
                         }
                     }
@@ -74,6 +75,10 @@ namespace RecipeExtractor
                 }
                 Console.WriteLine($"Всего извлечено {iconCount} иконок");
 
+                // === САМОПРОВЕРКА ДАННЫХ ===
+                var validator = new DataValidator(_factorioPath, extractedIconPaths);
+                var validationResult = validator.Validate(items, recipes);
+
                 // Экспорт данных
                 Console.WriteLine("\nЭкспорт предметов...");
                 await _exporter.ExportItemsAsync(items);
@@ -84,7 +89,19 @@ namespace RecipeExtractor
                 Console.WriteLine("\nЭкспорт сводки...");
                 await _exporter.ExportSummaryAsync(items, recipes);
 
+                // Экспорт отчёта о валидации
+                Console.WriteLine("\nЭкспорт отчёта о валидации...");
+                await _exporter.ExportValidationReportAsync(validationResult);
+
                 Console.WriteLine("\n✓ Готово!");
+
+                if (validationResult.HasErrors)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("\n⚠ Внимание: обнаружены критические ошибки в данных.");
+                    Console.WriteLine($"  Подробный отчёт: {Path.Combine(_outputPath, "validation_report.json")}");
+                    Console.ResetColor();
+                }
             }
             catch (Exception ex)
             {
