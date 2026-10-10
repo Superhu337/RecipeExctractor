@@ -7,7 +7,7 @@ namespace RecipeExtractor.Models
         public string Type { get; set; } = string.Empty;
         public string LocalizedName { get; set; } = string.Empty;
         public int StackSize { get; set; } = 1;
-        public string IconPath { get; set; } = string.Empty;
+        public string IconFileName { get; set; } = string.Empty;
         public string IconSize { get; set; } = string.Empty;
         public string Subgroup { get; set; } = string.Empty;
         public string Order { get; set; } = string.Empty;

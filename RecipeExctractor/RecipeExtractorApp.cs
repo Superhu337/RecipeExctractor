@@ -54,16 +54,18 @@ namespace RecipeExtractor
                 int iconCount = 0;
                 int totalItems = items.Count;
                 var extractedIconPaths = new HashSet<string>();
+                var processedRecipeIcons = new HashSet<string>();
 
+                // Сначала извлекаем иконки предметов
                 foreach (var item in items)
                 {
-                    if (!string.IsNullOrEmpty(item.IconPath))
+                    if (!string.IsNullOrEmpty(item.IconFileName))
                     {
-                        var iconPath = await _iconExtractor.ExtractIconAsync(item.IconPath, item.Name);
-                        if (iconPath != null)
+                        var IconFileName = await _iconExtractor.ExtractIconAsync(item.IconFileName, item.Name);
+                        if (IconFileName != null)
                         {
-                            item.IconPath = iconPath;
-                            extractedIconPaths.Add(iconPath);
+                            item.IconFileName = IconFileName;
+                            extractedIconPaths.Add(IconFileName);
                             iconCount++;
                         }
                     }
@@ -73,7 +75,35 @@ namespace RecipeExtractor
                         Console.WriteLine($"Обработано {iconCount + 1}/{totalItems} предметов, извлечено {iconCount} иконок...");
                     }
                 }
-                Console.WriteLine($"Всего извлечено {iconCount} иконок");
+                Console.WriteLine($"Всего извлечено {iconCount} иконок предметов");
+
+                // Теперь извлекаем иконки рецептов (используем ProductIconPath)
+                Console.WriteLine("\nИзвлечение иконок рецептов...");
+                int recipeIconCount = 0;
+                foreach (var recipe in recipes)
+                {
+                    var iconPathToUse = recipe.ProductIconPath ?? recipe.RecipeIconPath;
+                    if (!string.IsNullOrEmpty(iconPathToUse) && !string.IsNullOrEmpty(recipe.IconFileName))
+                    {
+                        if (!processedRecipeIcons.Contains(recipe.IconFileName))
+                        {
+                            var IconFileName = await _iconExtractor.ExtractIconAsync(iconPathToUse, recipe.Name, recipe.IconFileName);
+                            if (IconFileName != null)
+                            {
+                                recipe.IconFileName = IconFileName;
+                                extractedIconPaths.Add(IconFileName);
+                                recipeIconCount++;
+                                processedRecipeIcons.Add(recipe.IconFileName);
+                            }
+                        }
+                        else
+                        {
+                            // Иконка уже извлечена, просто указываем путь
+                            recipe.IconFileName = Path.Combine(Path.Combine(_outputPath, "icons"), recipe.IconFileName);
+                        }
+                    }
+                }
+                Console.WriteLine($"Всего извлечено {recipeIconCount} уникальных иконок рецептов");
 
                 // === САМОПРОВЕРКА ДАННЫХ ===
                 var validator = new DataValidator(_factorioPath, extractedIconPaths);

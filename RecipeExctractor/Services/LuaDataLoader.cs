@@ -10,6 +10,7 @@ namespace RecipeExtractor.Services
         private readonly string _factorioPath;
         private readonly string _modsPath;
         private readonly Script _luaScript;
+        private readonly Dictionary<string, string> _itemIcons = new();
 
         public LuaDataLoader(string factorioPath, string modsPath)
         {
@@ -25,8 +26,6 @@ namespace RecipeExtractor.Services
             var dataTable = new Table(_luaScript);
             var dataRawTable = new Table(_luaScript);
             dataTable.Set("raw", DynValue.NewTable(dataRawTable));
-
-            // Используем метод Set для гарантированной типизации
             _luaScript.Globals.Set("data", DynValue.NewTable(dataTable));
 
             _luaScript.DoString(@"
@@ -114,13 +113,11 @@ namespace RecipeExtractor.Services
         public List<Item> GetItems()
         {
             var items = new List<Item>();
+            var dataTable = _luaScript.Globals.Get("data");
+            if (dataTable.Type != DataType.Table) return items;
+            var dataTableObj = dataTable.Table;
 
-            // Используем Get() для гарантированного получения DynValue
-            var dataDyn = _luaScript.Globals.Get("data");
-            if (dataDyn.Type != DataType.Table) return items;
-            var dataTable = dataDyn.Table;
-
-            var dataRawDyn = dataTable.Get("raw");
+            var dataRawDyn = dataTableObj.Get("raw");
             if (dataRawDyn.Type != DataType.Table) return items;
             var dataRaw = dataRawDyn.Table;
 
@@ -138,6 +135,11 @@ namespace RecipeExtractor.Services
                         if (item != null)
                         {
                             items.Add(item);
+                            // Сохраняем иконку предмета для использования в рецептах
+                            if (!string.IsNullOrEmpty(item.IconFileName) && !string.IsNullOrEmpty(item.Name))
+                            {
+                                _itemIcons[item.Name] = item.IconFileName;
+                            }
                         }
                     }
                 }
@@ -149,12 +151,11 @@ namespace RecipeExtractor.Services
         public List<Recipe> GetRecipes()
         {
             var recipes = new List<Recipe>();
+            var dataTable = _luaScript.Globals.Get("data");
+            if (dataTable.Type != DataType.Table) return recipes;
+            var dataTableObj = dataTable.Table;
 
-            var dataDyn = _luaScript.Globals.Get("data");
-            if (dataDyn.Type != DataType.Table) return recipes;
-            var dataTable = dataDyn.Table;
-
-            var dataRawDyn = dataTable.Get("raw");
+            var dataRawDyn = dataTableObj.Get("raw");
             if (dataRawDyn.Type != DataType.Table) return recipes;
             var dataRaw = dataRawDyn.Table;
 
@@ -188,7 +189,7 @@ namespace RecipeExtractor.Services
                 if (nameVal.Type == DataType.String) item.Name = nameVal.String ?? string.Empty;
 
                 var iconVal = table.Get("icon");
-                if (iconVal.Type == DataType.String) item.IconPath = iconVal.String ?? string.Empty;
+                if (iconVal.Type == DataType.String) item.IconFileName = iconVal.String ?? string.Empty;
 
                 var iconSizeVal = table.Get("icon_size");
                 if (iconSizeVal.Type == DataType.Number) item.IconSize = iconSizeVal.Number.ToString();
@@ -238,7 +239,11 @@ namespace RecipeExtractor.Services
                 recipe.EnergyRequired = energyVal.Type == DataType.Number ? Convert.ToDouble(energyVal.Number) : 0.5;
 
                 var iconVal = table.Get("icon");
-                if (iconVal.Type == DataType.String) recipe.IconPath = iconVal.String ?? string.Empty;
+                if (iconVal.Type == DataType.String)
+                {
+                    recipe.RecipeIconPath = iconVal.String;
+                    recipe.IconFileName = iconVal.String ?? string.Empty;
+                }
 
                 var iconSizeVal = table.Get("icon_size");
                 if (iconSizeVal.Type == DataType.Number) recipe.IconSize = iconSizeVal.Number.ToString();
@@ -246,8 +251,48 @@ namespace RecipeExtractor.Services
                 var enabledVal = table.Get("enabled");
                 recipe.Enabled = enabledVal.Type == DataType.Boolean ? enabledVal.Boolean : true;
 
-                recipe.Ingredients = ConvertIngredients(table.Get("ingredients"));
-                recipe.Results = ConvertResults(table.Get("results"));
+                // Проверяем формат difficulty (normal/expensive)
+                var normalVal = table.Get("normal");
+                var expensiveVal = table.Get("expensive");
+
+                if (normalVal.Type == DataType.Table || expensiveVal.Type == DataType.Table)
+                {
+                    recipe.RecipeFormat = "difficulty";
+                    // Используем normal как основной, если есть
+                    var primaryTable = normalVal.Type == DataType.Table ? normalVal.Table : expensiveVal.Table;
+                    if (primaryTable != null)
+                    {
+                        recipe.Ingredients = ConvertIngredients(primaryTable.Get("ingredients"));
+                        ParseResultsFromTable(primaryTable, recipe);
+                    }
+                }
+                else
+                {
+                    recipe.Ingredients = ConvertIngredients(table.Get("ingredients"));
+                    ParseResultsFromTable(table, recipe);
+                }
+
+                // Определяем главный продукт
+                var mainProductVal = table.Get("main_product");
+                if (mainProductVal.Type == DataType.String)
+                {
+                    recipe.MainProduct = mainProductVal.String;
+                }
+                else if (recipe.Results.Count == 1)
+                {
+                    recipe.MainProduct = recipe.Results[0].Name;
+                }
+                else if (recipe.Results.Count > 1)
+                {
+                    // Если нет main_product, берем первый результат с наибольшей вероятностью
+                    recipe.MainProduct = recipe.Results
+                        .OrderByDescending(r => r.Probability)
+                        .ThenBy(r => r.Amount)
+                        .First().Name;
+                }
+
+                // Определяем иконку
+                DetermineRecipeIcon(recipe);
 
                 recipe.Properties = new Dictionary<string, object>();
                 foreach (var kvp in table.Pairs)
@@ -264,6 +309,73 @@ namespace RecipeExtractor.Services
             {
                 return null;
             }
+        }
+
+        private void ParseResultsFromTable(Table table, Recipe recipe)
+        {
+            var resultsVal = table.Get("results");
+            var resultVal = table.Get("result");
+            var resultCountVal = table.Get("result_count");
+
+            if (resultsVal.Type == DataType.Table && resultsVal.Table.Pairs.Count() > 0)
+            {
+                // Новый формат: results = [{name="...", amount=...}, ...]
+                recipe.Results = ConvertResults(resultsVal);
+                recipe.RecipeFormat = "multiple";
+            }
+            else if (resultVal.Type == DataType.String)
+            {
+                // Старый формат: result = "item-name"
+                int resultCount = 1;
+                if (resultCountVal.Type == DataType.Number)
+                    resultCount = Convert.ToInt32(resultCountVal.Number);
+
+                recipe.Results = new List<Result>
+                {
+                    new Result
+                    {
+                        Name = resultVal.String ?? string.Empty,
+                        Amount = resultCount,
+                        Probability = 1.0,
+                        Type = "item"
+                    }
+                };
+                recipe.RecipeFormat = "single";
+            }
+            else
+            {
+                recipe.RecipeFormat = "unknown";
+            }
+        }
+
+        private void DetermineRecipeIcon(Recipe recipe)
+        {
+            // 1. Если у рецепта есть своя иконка
+            if (!string.IsNullOrEmpty(recipe.RecipeIconPath))
+            {
+                recipe.ProductIconPath = recipe.RecipeIconPath;
+                recipe.IconFileName = $"{recipe.Name}.png";
+                return;
+            }
+
+            // 2. Если есть main_product, берем его иконку
+            if (!string.IsNullOrEmpty(recipe.MainProduct) && _itemIcons.ContainsKey(recipe.MainProduct))
+            {
+                recipe.ProductIconPath = _itemIcons[recipe.MainProduct];
+                recipe.IconFileName = $"{recipe.MainProduct}.png";
+                return;
+            }
+
+            // 3. Если один результат, берем его иконку
+            if (recipe.Results.Count == 1 && _itemIcons.ContainsKey(recipe.Results[0].Name))
+            {
+                recipe.ProductIconPath = _itemIcons[recipe.Results[0].Name];
+                recipe.IconFileName = $"{recipe.Results[0].Name}.png";
+                return;
+            }
+
+            // 4. Если нет иконки
+            recipe.IconFileName = $"{recipe.Name}.png";
         }
 
         private List<Ingredient> ConvertIngredients(DynValue luaIngredients)
@@ -389,12 +501,10 @@ namespace RecipeExtractor.Services
                 var table = val.Table;
                 visitedTables ??= new HashSet<Table>();
 
-                // Защита от циклических ссылок
                 if (visitedTables.Contains(table))
                     return "[circular reference]";
                 visitedTables.Add(table);
 
-                // Определяем, является ли таблица массивом (последовательные числовые ключи 1..N)
                 bool isArray = true;
                 int maxIndex = 0;
                 int pairCount = 0;
@@ -413,7 +523,6 @@ namespace RecipeExtractor.Services
                         break;
                     }
                 }
-                // Если количество пар не совпадает с максимальным индексом, это не массив
                 if (isArray && maxIndex != pairCount)
                     isArray = false;
 
@@ -447,7 +556,6 @@ namespace RecipeExtractor.Services
                     return dict;
                 }
             }
-            // Для функций, userdata и других типов возвращаем строковое представление
             try
             {
                 var strResult = val.CastToString();

@@ -1,4 +1,3 @@
-// Models/Recipe.cs
 namespace RecipeExtractor.Models
 {
     public class Recipe
@@ -9,7 +8,24 @@ namespace RecipeExtractor.Models
         public double EnergyRequired { get; set; } = 0.5;
         public List<Ingredient> Ingredients { get; set; } = new();
         public List<Result> Results { get; set; } = new();
-        public string IconPath { get; set; } = string.Empty;
+
+        // === НОВЫЕ ПОЛЯ ===
+
+        // Главный результат (для определения иконки)
+        public string? MainProduct { get; set; }
+
+        // Формат рецепта: "single", "multiple", "difficulty", "unknown"
+        public string RecipeFormat { get; set; } = "unknown";
+
+        // Иконка рецепта (если есть своя в данных)
+        public string? RecipeIconPath { get; set; }
+
+        // Иконка главного продукта (fallback)
+        public string? ProductIconPath { get; set; }
+
+        // Фактическое имя файла иконки для сохранения
+        public string IconFileName { get; set; } = string.Empty;
+
         public string IconSize { get; set; } = string.Empty;
         public bool Enabled { get; set; } = true;
         public Dictionary<string, object> Properties { get; set; } = new();

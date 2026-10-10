@@ -37,24 +37,26 @@ namespace RecipeExtractor.Services
             }
         }
 
-        public async Task<string?> ExtractIconAsync(string iconPath, string itemName)
+        public async Task<string?> ExtractIconAsync(string IconFileName, string itemName, string? iconFileName = null)
         {
-            if (string.IsNullOrEmpty(iconPath))
+            if (string.IsNullOrEmpty(IconFileName))
                 return null;
 
             try
             {
-                var fullPath = ResolveIconPath(iconPath);
-                
+                var fullPath = ResolveIconPath(IconFileName);
+
                 if (fullPath != null && File.Exists(fullPath))
                 {
-                    var outputPath = Path.Combine(_outputPath, $"{SanitizeFileName(itemName)}.png");
-                    
+                    // Используем iconFileName если он предоставлен, иначе имя предмета
+                    var fileName = iconFileName ?? $"{SanitizeFileName(itemName)}.png";
+                    var outputPath = Path.Combine(_outputPath, fileName);
+
                     using (var image = await Image.LoadAsync(fullPath))
                     {
                         await image.SaveAsPngAsync(outputPath);
                     }
-                    
+
                     return outputPath;
                 }
             }
@@ -66,27 +68,27 @@ namespace RecipeExtractor.Services
             return null;
         }
 
-        private string? ResolveIconPath(string iconPath)
+        private string? ResolveIconPath(string IconFileName)
         {
             // Нормализация пути
-            iconPath = iconPath.Replace("\\", Path.DirectorySeparatorChar.ToString());
-            iconPath = iconPath.Replace("/", Path.DirectorySeparatorChar.ToString());
+            IconFileName = IconFileName.Replace("\\", Path.DirectorySeparatorChar.ToString());
+            IconFileName = IconFileName.Replace("/", Path.DirectorySeparatorChar.ToString());
 
             // Прямой путь
-            var directPath = Path.Combine(_factorioPath, iconPath);
+            var directPath = Path.Combine(_factorioPath, IconFileName);
             if (File.Exists(directPath))
                 return directPath;
 
             // Поиск в папках данных
             foreach (var searchPath in _searchPaths)
             {
-                var fullPath = Path.Combine(searchPath, iconPath);
+                var fullPath = Path.Combine(searchPath, IconFileName);
                 if (File.Exists(fullPath))
                     return fullPath;
             }
 
             // Поиск файла по имени
-            var fileName = Path.GetFileName(iconPath);
+            var fileName = Path.GetFileName(IconFileName);
             foreach (var searchPath in _searchPaths)
             {
                 if (Directory.Exists(searchPath))

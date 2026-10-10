@@ -75,19 +75,19 @@ namespace RecipeExtractor.Services
                 }
 
                 // Проверка иконки
-                if (string.IsNullOrWhiteSpace(item.IconPath))
+                if (string.IsNullOrWhiteSpace(item.IconFileName))
                 {
                     itemsWithoutIcon.Add(item.Name);
                     result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Item,
                         item.Name, item.Type, "icon",
                         "Отсутствует путь к иконке");
                 }
-                else if (!File.Exists(item.IconPath))
+                else if (!File.Exists(item.IconFileName))
                 {
                     result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Icon,
                         item.Name, item.Type, "icon",
                         "Файл иконки не найден на диске",
-                        item.IconPath);
+                        item.IconFileName);
                 }
 
                 // Проверка размера стака
@@ -188,21 +188,52 @@ namespace RecipeExtractor.Services
                     ValidateIngredients(recipe, knownItems, result);
                 }
 
-                // Проверка результатов
+                // Проверка результатов (теперь корректно обрабатываются оба формата)
                 if (recipe.Results == null || recipe.Results.Count == 0)
                 {
-                    recipesWithEmptyResults.Add(recipe.Name);
-                    result.AddIssue(ValidationSeverity.Error, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "results",
-                        "Рецепт не имеет результатов");
+                    // Проверяем формат рецепта
+                    if (recipe.RecipeFormat == "unknown")
+                    {
+                        recipesWithEmptyResults.Add(recipe.Name);
+                        result.AddIssue(ValidationSeverity.Error, ValidationCategory.Recipe,
+                            recipe.Name, "recipe", "results",
+                            "Рецепт не имеет результатов (неизвестный формат)");
+                    }
+                    else
+                    {
+                        result.AddIssue(ValidationSeverity.Info, ValidationCategory.Recipe,
+                            recipe.Name, "recipe", "results",
+                            $"Рецепт использует формат '{recipe.RecipeFormat}' без результатов");
+                    }
                 }
                 else
                 {
                     ValidateResults(recipe, knownItems, result);
                 }
 
+                // Проверка главного продукта
+                if (string.IsNullOrEmpty(recipe.MainProduct) && recipe.Results.Count > 0)
+                {
+                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "main_product",
+                        "Не определен главный продукт рецепта");
+                }
+
+                // Проверка несоответствия имени рецепта и результата
+                if (recipe.Results.Count == 1 && recipe.RecipeFormat == "single")
+                {
+                    var singleResult = recipe.Results[0];
+                    if (singleResult.Name != recipe.Name && singleResult.Amount == 1)
+                    {
+                        result.AddIssue(ValidationSeverity.Info, ValidationCategory.Recipe,
+                            recipe.Name, "recipe", "name_mismatch",
+                            "Имя рецепта не совпадает с результатом (возможно, это нормально)",
+                            $"Рецепт: {recipe.Name}, Результат: {singleResult.Name}");
+                    }
+                }
+
                 // Проверка иконки рецепта
-                if (string.IsNullOrWhiteSpace(recipe.IconPath))
+                if (string.IsNullOrWhiteSpace(recipe.IconFileName))
                 {
                     result.AddIssue(ValidationSeverity.Info, ValidationCategory.Recipe,
                         recipe.Name, "recipe", "icon",
