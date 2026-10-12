@@ -141,10 +141,10 @@ namespace RecipeExtractor.Services
                 {
                     TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Icon,
                         item.Name, item.Type, "icon", "Файл иконки не найден на диске",
-                        $"Игра: {item.IconPath} | Диск: {item.PhysicalIconPath}");
+                        $"Игра: {item.IconPath ?? "<нет>"} | Диск: {item.PhysicalIconPath ?? "<нет>"}");
                 }
 
-                if (item.StackSize > 10001)
+                if (item.StackSize > 100001)
                     TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
                         item.Name, item.Type, "stack_size", "Подозрительно большой размер стака", $"Значение: {item.StackSize}");
             }

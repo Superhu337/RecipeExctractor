@@ -232,7 +232,7 @@ namespace RecipeExtractor.Services
                     {
                         var key = kvp.Key.String?.Trim() ?? string.Empty;
                         if (!string.IsNullOrEmpty(key))
-                            item.Properties[key] = ConvertDynValueToObject(kvp.Value);
+                            item.Properties[key] = ConvertDynValueToObject(kvp.Value) ?? string.Empty;
                     }
                 }
 
@@ -321,7 +321,7 @@ namespace RecipeExtractor.Services
                     {
                         var key = kvp.Key.String?.Trim() ?? string.Empty;
                         if (!string.IsNullOrEmpty(key))
-                            recipe.Properties[key] = ConvertDynValueToObject(kvp.Value);
+                            recipe.Properties[key] = ConvertDynValueToObject(kvp.Value) ?? string.Empty;
                     }
                 }
 

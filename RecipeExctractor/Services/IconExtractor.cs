@@ -1,5 +1,4 @@
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Png;
+
 
 namespace RecipeExtractor.Services
 {
@@ -26,25 +25,18 @@ namespace RecipeExtractor.Services
         /// </summary>
         public string? CopyIcon(string? physicalPath, string itemName, string? desiredFileName = null)
         {
-            if (string.IsNullOrWhiteSpace(physicalPath))
-                return null;
-
-            if (!File.Exists(physicalPath))
+            if (string.IsNullOrWhiteSpace(physicalPath) || !File.Exists(physicalPath))
                 return null;
 
             var fileName = desiredFileName ?? $"{SanitizeFileName(itemName)}.png";
             var outputPath = Path.Combine(_outputPath, fileName);
 
-            // Не копируем повторно
             if (_copiedFiles.Contains(outputPath))
                 return outputPath;
 
             try
             {
-                using (var image = Image.Load(physicalPath))
-                {
-                    image.SaveAsPng(outputPath);
-                }
+                File.Copy(physicalPath, outputPath, overwrite: true);
                 _copiedFiles.Add(outputPath);
                 return outputPath;
             }
