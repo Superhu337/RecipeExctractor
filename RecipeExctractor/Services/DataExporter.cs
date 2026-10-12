@@ -13,10 +13,12 @@ namespace RecipeExtractor.Services
         public DataExporter(string outputPath)
         {
             _outputPath = outputPath;
-            
+
+            // Гарантированно создаём папку вывода
             if (!Directory.Exists(_outputPath))
             {
                 Directory.CreateDirectory(_outputPath);
+                Console.WriteLine($"  [DataExporter] Создана папка: {_outputPath}");
             }
 
             _jsonOptions = new JsonSerializerOptions

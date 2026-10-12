@@ -19,7 +19,7 @@ namespace RecipeExtractor
             _modsPath = modsPath;
 
             _dataLoader = new LuaDataLoader(factorioPath, modsPath);
-            _iconExtractor = new IconExtractor(factorioPath, Path.Combine(outputPath, "icons"));
+            _iconExtractor = new IconExtractor(Path.Combine(outputPath, "icons"));
             _exporter = new DataExporter(outputPath);
         }
 
@@ -31,61 +31,79 @@ namespace RecipeExtractor
 
             try
             {
-                // Загрузка данных из Lua
+                // === АВТООЧИСТКА ПАПКИ ВЫВОДА ===
+                CleanOutputDirectory();
+                // =================================
+
                 Console.WriteLine("\nЗагрузка базовых данных...");
                 await _dataLoader.LoadBaseDataAsync();
 
                 Console.WriteLine("\nЗагрузка модов...");
                 await _dataLoader.LoadModsAsync();
 
-                // Получение предметов
                 Console.WriteLine("\nИзвлечение предметов...");
                 var items = _dataLoader.GetItems();
                 Console.WriteLine($"Найдено {items.Count} предметов");
 
-                // Получение рецептов
                 Console.WriteLine("\nИзвлечение рецептов...");
                 var recipes = _dataLoader.GetRecipes();
                 Console.WriteLine($"Найдено {recipes.Count} рецептов");
 
-                // Извлечение иконок для заглушек (если они были добавлены)
-                Console.WriteLine("\nИзвлечение иконок для заглушек...");
-                int stubIconCount = 0;
-                var extractedIconPaths = new HashSet<string>();
-                var processedRecipeIcons = new HashSet<string>();
-                foreach (var item in items.Where(i => i.Properties.ContainsKey("auto_generated")))
+                // === КОПИРОВАНИЕ ИКОНОК ===
+                Console.WriteLine("\nКопирование иконок предметов...");
+                int itemIconCount = 0;
+                foreach (var item in items)
                 {
-                    if (!string.IsNullOrEmpty(item.IconPath) && !File.Exists(item.IconPath))
+                    if (!string.IsNullOrEmpty(item.PhysicalIconPath))
                     {
-                        // Пытаемся найти иконку по имени предмета
-                        var possibleIconPath = Path.Combine(_factorioPath, "data", $"base/graphics/icons/{item.Name}.png");
-                        if (File.Exists(possibleIconPath))
+                        var copied = _iconExtractor.CopyIcon(item.PhysicalIconPath, item.Name);
+                        if (copied != null)
                         {
-                            var IconFileName = await _iconExtractor.ExtractIconAsync(possibleIconPath, item.Name);
-                            if (IconFileName != null)
+                            item.CopiedIconPath = copied;
+                            itemIconCount++;
+                        }
+                    }
+
+                    if ((itemIconCount + 1) % 100 == 0)
+                        Console.WriteLine($"  Скопировано {itemIconCount} иконок...");
+                }
+                Console.WriteLine($"✓ Скопировано {itemIconCount} иконок предметов");
+
+                Console.WriteLine("\nКопирование иконок рецептов...");
+                int recipeIconCount = 0;
+                var processedRecipeIcons = new HashSet<string>();
+                foreach (var recipe in recipes)
+                {
+                    if (!string.IsNullOrEmpty(recipe.PhysicalIconPath) && !string.IsNullOrEmpty(recipe.IconFileName))
+                    {
+                        if (!processedRecipeIcons.Contains(recipe.IconFileName))
+                        {
+                            var copied = _iconExtractor.CopyIcon(recipe.PhysicalIconPath, recipe.Name, recipe.IconFileName);
+                            if (copied != null)
                             {
-                                item.IconPath = IconFileName;
-                                extractedIconPaths.Add(IconFileName);
-                                stubIconCount++;
+                                recipe.CopiedIconPath = copied;
+                                recipeIconCount++;
+                                processedRecipeIcons.Add(recipe.IconFileName);
                             }
+                        }
+                        else
+                        {
+                            recipe.CopiedIconPath = Path.Combine(Path.Combine(_outputPath, "icons"), recipe.IconFileName);
                         }
                     }
                 }
-                if (stubIconCount > 0)
-                    Console.WriteLine($"Извлечено {stubIconCount} иконок для заглушек");
+                Console.WriteLine($"✓ Скопировано {recipeIconCount} уникальных иконок рецептов");
 
-                // === ИНТЕРАКТИВНЫЙ ВЫБОР РЕЖИМА ВАЛИДАЦИИ ===
+                // === САМОПРОВЕРКА ===
                 Console.WriteLine("\n═══════════════════════════════════════════════════");
                 Console.WriteLine("  НАСТРОЙКА САМОПРОВЕРКИ");
                 Console.WriteLine("═══════════════════════════════════════════════════");
-
                 var severityFilter = ValidationModeParser.GetModeFromUser();
 
-                // === САМОПРОВЕРКА ДАННЫХ ===
-                var validator = new DataValidator(_factorioPath, extractedIconPaths);
+                var validator = new DataValidator(_factorioPath);
                 var validationResult = validator.Validate(items, recipes, severityFilter);
 
-                // Экспорт данных (items теперь содержит заглушки)
+                // === ЭКСПОРТ ===
                 Console.WriteLine("\nЭкспорт предметов...");
                 await _exporter.ExportItemsAsync(items);
 
@@ -95,9 +113,6 @@ namespace RecipeExtractor
                 Console.WriteLine("\nЭкспорт сводки...");
                 await _exporter.ExportSummaryAsync(items, recipes);
 
-
-
-                // Экспорт отчёта о валидации
                 Console.WriteLine("\nЭкспорт отчёта о валидации...");
                 await _exporter.ExportValidationReportAsync(validationResult);
 
@@ -106,8 +121,8 @@ namespace RecipeExtractor
                 if (validationResult.HasErrors)
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine("\n⚠ Внимание: обнаружены критические ошибки в данных.");
-                    Console.WriteLine($"  Подробный отчёт: {Path.Combine(_outputPath, "validation_report.json")}");
+                    Console.WriteLine("\n Обнаружены критические ошибки в данных.");
+                    Console.WriteLine($"  Отчёт: {Path.Combine(_outputPath, "validation_report.json")}");
                     Console.ResetColor();
                 }
             }
@@ -115,6 +130,91 @@ namespace RecipeExtractor
             {
                 Console.WriteLine($"\n✗ Ошибка: {ex.Message}");
                 Console.WriteLine($"Стек: {ex.StackTrace}");
+            }
+        }
+
+        /// <summary>
+        /// Автоматически очищает папку вывода перед началом работы.
+        /// Гарантирует существование папки и подпапки icons/.
+        /// </summary>
+        private void CleanOutputDirectory()
+        {
+            var iconsPath = Path.Combine(_outputPath, "icons");
+
+            // Если папка не существует — просто создаём её
+            if (!Directory.Exists(_outputPath))
+            {
+                Console.WriteLine($"\nСоздание папки вывода: {_outputPath}");
+                Directory.CreateDirectory(_outputPath);
+                Directory.CreateDirectory(iconsPath);
+                return;
+            }
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write($"\nПапка '{_outputPath}' существует. Очистить её? (Y/n) [по умолчанию Y]: ");
+            Console.ResetColor();
+
+            var input = Console.ReadLine()?.Trim().ToLower();
+
+            if (input == "n" || input == "no")
+            {
+                Console.WriteLine("  → Пропуск очистки. Существующие файлы будут перезаписаны.");
+                // Всё равно убеждаемся, что папка icons существует
+                if (!Directory.Exists(iconsPath))
+                    Directory.CreateDirectory(iconsPath);
+                return;
+            }
+
+            Console.WriteLine("\nОчистка папки вывода...");
+            try
+            {
+                var dirInfo = new DirectoryInfo(_outputPath);
+
+                // Удаляем все файлы в корневой папке
+                foreach (var file in dirInfo.GetFiles())
+                {
+                    try { file.Delete(); }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"  ⚠ Не удалось удалить файл {file.Name}: {ex.Message}");
+                    }
+                }
+
+                // Удаляем все подпапки (icons и т.д.)
+                foreach (var subDir in dirInfo.GetDirectories())
+                {
+                    try { subDir.Delete(true); }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"   Не удалось удалить папку {subDir.Name}: {ex.Message}");
+                    }
+                }
+
+                Console.WriteLine($"  ✓ Содержимое папки очищено: {_outputPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  ✗ Ошибка при очистке: {ex.Message}");
+                Console.ResetColor();
+            }
+
+            // === ВАЖНО: Гарантированно создаём папку и подпапку icons ===
+            try
+            {
+                if (!Directory.Exists(_outputPath))
+                    Directory.CreateDirectory(_outputPath);
+
+                if (!Directory.Exists(iconsPath))
+                    Directory.CreateDirectory(iconsPath);
+
+                Console.WriteLine($"  ✓ Папка и подпапка icons/ созданы");
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  ✗ Ошибка при создании папки: {ex.Message}");
+                Console.ResetColor();
             }
         }
     }

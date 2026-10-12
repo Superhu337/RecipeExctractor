@@ -1,115 +1,64 @@
-// Services/IconExtractor.cs
 using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Processing;
 using SixLabors.ImageSharp.Formats.Png;
 
 namespace RecipeExtractor.Services
 {
     public class IconExtractor
     {
-        private readonly string _factorioPath;
         private readonly string _outputPath;
-        private readonly HashSet<string> _searchPaths;
+        private readonly HashSet<string> _copiedFiles = new();
 
-        public IconExtractor(string factorioPath, string outputPath)
+        public IconExtractor(string outputPath)
         {
-            _factorioPath = factorioPath;
             _outputPath = outputPath;
-            _searchPaths = new HashSet<string>();
 
-            InitializeSearchPaths();
-
+            // Гарантированно создаём папку иконок
             if (!Directory.Exists(_outputPath))
             {
                 Directory.CreateDirectory(_outputPath);
+                Console.WriteLine($"  [IconExtractor] Создана папка: {_outputPath}");
             }
         }
 
-        private void InitializeSearchPaths()
+        /// <summary>
+        /// Копирует иконку по физическому пути в папку вывода.
+        /// Возвращает путь к скопированному файлу или null.
+        /// </summary>
+        public string? CopyIcon(string? physicalPath, string itemName, string? desiredFileName = null)
         {
-            _searchPaths.Add(Path.Combine(_factorioPath, "data", "base"));
-            _searchPaths.Add(Path.Combine(_factorioPath, "data", "core"));
-            
-            var modsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Factorio", "mods");
-            if (Directory.Exists(modsPath))
-            {
-                _searchPaths.Add(modsPath);
-            }
-        }
-
-        public async Task<string?> ExtractIconAsync(string IconFileName, string itemName, string? iconFileName = null)
-        {
-            if (string.IsNullOrEmpty(IconFileName))
+            if (string.IsNullOrWhiteSpace(physicalPath))
                 return null;
+
+            if (!File.Exists(physicalPath))
+                return null;
+
+            var fileName = desiredFileName ?? $"{SanitizeFileName(itemName)}.png";
+            var outputPath = Path.Combine(_outputPath, fileName);
+
+            // Не копируем повторно
+            if (_copiedFiles.Contains(outputPath))
+                return outputPath;
 
             try
             {
-                var fullPath = ResolveIconPath(IconFileName);
-
-                if (fullPath != null && File.Exists(fullPath))
+                using (var image = Image.Load(physicalPath))
                 {
-                    var fileName = iconFileName ?? $"{SanitizeFileName(itemName)}.png";
-                    var outputPath = Path.Combine(_outputPath, fileName);
-
-                    // Проверяем, не существует ли уже файл
-                    if (!File.Exists(outputPath))
-                    {
-                        using (var image = await Image.LoadAsync(fullPath))
-                        {
-                            await image.SaveAsPngAsync(outputPath);
-                        }
-                    }
-
-                    return outputPath;
+                    image.SaveAsPng(outputPath);
                 }
+                _copiedFiles.Add(outputPath);
+                return outputPath;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка при извлечении иконки {itemName}: {ex.Message}");
+                Console.WriteLine($"  ⚠ Ошибка копирования иконки {itemName}: {ex.Message}");
+                return null;
             }
-
-            return null;
-        }
-
-        private string? ResolveIconPath(string IconFileName)
-        {
-            // Нормализация пути
-            IconFileName = IconFileName.Replace("\\", Path.DirectorySeparatorChar.ToString());
-            IconFileName = IconFileName.Replace("/", Path.DirectorySeparatorChar.ToString());
-
-            // Прямой путь
-            var directPath = Path.Combine(_factorioPath, IconFileName);
-            if (File.Exists(directPath))
-                return directPath;
-
-            // Поиск в папках данных
-            foreach (var searchPath in _searchPaths)
-            {
-                var fullPath = Path.Combine(searchPath, IconFileName);
-                if (File.Exists(fullPath))
-                    return fullPath;
-            }
-
-            // Поиск файла по имени
-            var fileName = Path.GetFileName(IconFileName);
-            foreach (var searchPath in _searchPaths)
-            {
-                if (Directory.Exists(searchPath))
-                {
-                    var files = Directory.GetFiles(searchPath, fileName, SearchOption.AllDirectories);
-                    if (files.Length > 0)
-                        return files[0];
-                }
-            }
-
-            return null;
         }
 
         private string SanitizeFileName(string fileName)
         {
             var invalidChars = Path.GetInvalidFileNameChars();
-            var sanitized = new string(fileName.Select(c => invalidChars.Contains(c) ? '_' : c).ToArray());
-            return sanitized;
+            return new string(fileName.Select(c => invalidChars.Contains(c) ? '_' : c).ToArray());
         }
     }
 }

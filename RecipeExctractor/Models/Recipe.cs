@@ -9,23 +9,22 @@ namespace RecipeExtractor.Models
         public List<Ingredient> Ingredients { get; set; } = new();
         public List<Result> Results { get; set; } = new();
 
-        // === НОВЫЕ ПОЛЯ ===
-
-        // Главный результат (для определения иконки)
         public string? MainProduct { get; set; }
-
-        // Формат рецепта: "single", "multiple", "difficulty", "unknown"
         public string RecipeFormat { get; set; } = "unknown";
 
-        // Иконка рецепта (если есть своя в данных)
+        // Игровой путь иконки рецепта (если есть)
         public string? RecipeIconPath { get; set; }
 
-        // Иконка главного продукта (fallback)
+        // Игровой путь иконки главного продукта
         public string? ProductIconPath { get; set; }
 
-        // Фактическое имя файла иконки для сохранения
-        public string IconFileName { get; set; } = string.Empty;
+        // Физический путь на диске
+        public string? PhysicalIconPath { get; set; }
 
+        // Путь к скопированной иконке
+        public string? CopiedIconPath { get; set; }
+
+        public string IconFileName { get; set; } = string.Empty;
         public string IconSize { get; set; } = string.Empty;
         public bool Enabled { get; set; } = true;
         public Dictionary<string, object> Properties { get; set; } = new();

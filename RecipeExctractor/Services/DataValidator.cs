@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using RecipeExtractor.Services;
 
 namespace RecipeExtractor.Services
 {
@@ -11,23 +12,31 @@ namespace RecipeExtractor.Services
         private readonly string _factorioPath;
         private readonly HashSet<string> _extractedIconPaths;
 
+        private readonly FactorioPathResolver _pathResolver;
         public DataValidator(string factorioPath, HashSet<string>? extractedIconPaths = null)
         {
             _factorioPath = factorioPath;
             _extractedIconPaths = extractedIconPaths ?? new HashSet<string>();
+
+            // Инициализация _pathResolver (была пропущена — отсюда NullReferenceException)
+            var modsPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Factorio",
+                "mods"
+            );
+            _pathResolver = new FactorioPathResolver(factorioPath, modsPath);
         }
 
         public ValidationResult Validate(List<Item> items, List<Recipe> recipes, HashSet<ValidationSeverity>? severityFilter = null)
         {
             var result = new ValidationResult { TotalItems = items.Count, TotalRecipes = recipes.Count };
-
             Console.WriteLine("\n=== Запуск самопроверки данных ===");
+
             if (severityFilter != null && severityFilter.Count > 0)
                 Console.WriteLine($"Режим фильтрации: [{string.Join(", ", severityFilter.Select(s => s.ToString()))}]");
             else
                 Console.WriteLine("Режим фильтрации: ВСЕ проверки");
 
-            // === АВТОМАТИЧЕСКОЕ СОЗДАНИЕ ЗАГЛУШЕК ДЛЯ ОТСУТСТВУЮЩИХ ПРЕДМЕТОВ ===
             var missingItems = ResolveMissingItems(items, recipes);
             if (missingItems.Count > 0)
             {
@@ -35,14 +44,11 @@ namespace RecipeExtractor.Services
                 result.TotalItems = items.Count;
                 Console.WriteLine($"✓ Добавлено {missingItems.Count} заглушек для отсутствующих предметов");
             }
-            // =====================================================================
 
             var knownItemNames = new HashSet<string>(items.Select(i => i.Name).Where(n => !string.IsNullOrEmpty(n)));
-
             ValidateItems(items, knownItemNames, result, severityFilter);
             ValidateRecipes(recipes, knownItemNames, result, severityFilter);
             ValidateCrossReferences(items, recipes, knownItemNames, result, severityFilter);
-
             PrintSummary(result, severityFilter);
             return result;
         }
@@ -51,7 +57,6 @@ namespace RecipeExtractor.Services
         {
             var existingNames = new HashSet<string>(items.Select(i => i.Name));
             var referencedNames = new HashSet<string>();
-
             foreach (var recipe in recipes)
             {
                 foreach (var ing in recipe.Ingredients) if (!string.IsNullOrEmpty(ing.Name)) referencedNames.Add(ing.Name);
@@ -63,15 +68,16 @@ namespace RecipeExtractor.Services
 
             Console.WriteLine($"\n⚠ Найдено {missingNames.Count} отсутствующих предметов, создаю заглушки...");
             var stubItems = new List<Item>();
-
             foreach (var name in missingNames)
             {
                 var iconPath = TryFindIconForItem(name);
+                var physicalPath = _pathResolver.ResolveToPhysicalPath(iconPath);
                 stubItems.Add(new Item
                 {
                     Name = name,
                     Type = "item",
                     IconPath = iconPath ?? string.Empty,
+                    PhysicalIconPath = physicalPath,
                     StackSize = 100,
                     Subgroup = "other",
                     Order = $"z[auto-generated]-{name}",
@@ -80,30 +86,34 @@ namespace RecipeExtractor.Services
                         ["type"] = "item",
                         ["name"] = name,
                         ["auto_generated"] = true,
-                        ["note"] = "Предмет не был извлечен из data.raw, создана заглушка"
+                        ["note"] = "Предмет не был извлечён из data.raw, создана заглушка"
                     }
                 });
-                Console.WriteLine($"  + Создана заглушка: {name} (иконка: {(iconPath != null ? "найдена" : "не найдена")})");
+                Console.WriteLine($"  + Создана заглушка: {name} (иконка: {(physicalPath != null && File.Exists(physicalPath) ? "найдена" : "не найдена")})");
             }
             return stubItems;
         }
 
         private string? TryFindIconForItem(string itemName)
         {
+            // Стандартные игровые пути
             var possiblePaths = new[]
             {
-                $"base/graphics/icons/{itemName}.png",
-                $"base/graphics/icons/fluid/{itemName}.png",
-                $"base/graphics/icons/equipment/{itemName}.png"
-            };
+        $"__base__/graphics/icons/{itemName}.png",
+        $"__base__/graphics/icons/fluid/{itemName}.png",
+        $"__base__/graphics/icons/equipment/{itemName}.png"
+    };
 
-            foreach (var relativePath in possiblePaths)
+            foreach (var gamePath in possiblePaths)
             {
-                var fullPath = Path.Combine(_factorioPath, "data", relativePath);
-                if (File.Exists(fullPath)) return fullPath;
+                var physicalPath = _pathResolver.ResolveToPhysicalPath(gamePath);
+                if (physicalPath != null && File.Exists(physicalPath))
+                    return gamePath;
             }
             return null;
         }
+
+
 
         private void ValidateItems(List<Item> items, HashSet<string> knownNames, ValidationResult result, HashSet<ValidationSeverity>? filter)
         {
@@ -113,19 +123,30 @@ namespace RecipeExtractor.Services
             {
                 if (string.IsNullOrWhiteSpace(item.Name))
                 {
-                    TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Item, "[без имени]", item.Type, "name", "Предмет без имени");
+                    TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Item,
+                        "[без имени]", item.Type, "name", "Предмет без имени", $"Тип: {item.Type}");
                     continue;
                 }
                 if (!seenNames.Add(item.Name))
-                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item, item.Name, item.Type, "name", "Дублирующееся имя предмета");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
+                        item.Name, item.Type, "name", "Дублирующееся имя предмета", $"Тип: {item.Type}");
 
-                if (string.IsNullOrWhiteSpace(item.IconPath))
-                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item, item.Name, item.Type, "icon", "Отсутствует путь к иконке");
-                else if (!File.Exists(item.IconPath))
-                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Icon, item.Name, item.Type, "icon", "Файл иконки не найден", item.IconPath);
+                // Проверяем физический путь
+                if (string.IsNullOrWhiteSpace(item.PhysicalIconPath))
+                {
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
+                        item.Name, item.Type, "icon", "Отсутствует путь к иконке");
+                }
+                else if (!File.Exists(item.PhysicalIconPath))
+                {
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Icon,
+                        item.Name, item.Type, "icon", "Файл иконки не найден на диске",
+                        $"Игра: {item.IconPath} | Диск: {item.PhysicalIconPath}");
+                }
 
-                if (item.StackSize > 10000)
-                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item, item.Name, item.Type, "stack_size", "Подозрительно большой размер стака", $"Значение: {item.StackSize}");
+                if (item.StackSize > 10001)
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
+                        item.Name, item.Type, "stack_size", "Подозрительно большой размер стака", $"Значение: {item.StackSize}");
             }
         }
 
@@ -144,22 +165,35 @@ namespace RecipeExtractor.Services
                     TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe, recipe.Name, "recipe", "name", "Дублирующееся имя рецепта");
 
                 if (recipe.Ingredients == null || recipe.Ingredients.Count == 0)
+                {
                     TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe, recipe.Name, "recipe", "ingredients", "Рецепт не имеет ингредиентов");
+                }
                 else
+                {
                     ValidateIngredients(recipe, knownItems, result, filter);
+                }
 
+                // === ИСПРАВЛЕННАЯ ЛОГИКА ПРОВЕРКИ РЕЗУЛЬТАТОВ ===
                 if (recipe.Results == null || recipe.Results.Count == 0)
                 {
-                    // Проверяем, есть ли результат в properties (старый формат)
-                    bool hasOldFormat = recipe.Properties != null && recipe.Properties.ContainsKey("result");
-                    if (!hasOldFormat)
+                    bool hasOldFormatResult = recipe.Properties.ContainsKey("result");
+                    if (!hasOldFormatResult)
+                    {
                         TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Recipe, recipe.Name, "recipe", "results", "Рецепт не имеет результатов");
+                    }
                     else
-                        TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.Recipe, recipe.Name, "recipe", "results", "Рецепт использует старый формат (поле result)");
+                    {
+                        TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.Recipe, recipe.Name, "recipe", "results", "Рецепт использует старый формат (result), но не был распознан парсером");
+                    }
                 }
                 else
                 {
                     ValidateResults(recipe, knownItems, result, filter);
+                }
+
+                if (string.IsNullOrEmpty(recipe.MainProduct) && recipe.Results.Count > 0)
+                {
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe, recipe.Name, "recipe", "main_product", "Не определен главный продукт рецепта");
                 }
             }
         }
@@ -197,6 +231,12 @@ namespace RecipeExtractor.Services
                 }
                 if (!seen.Add(res.Name))
                     TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe, recipe.Name, "recipe", "results", "Дублирующийся результат", res.Name);
+
+                if (res.Amount <= 0)
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe, recipe.Name, "recipe", "results", "Количество результата <= 0", $"{res.Name}: {res.Amount}");
+
+                if (res.Probability < 0 || res.Probability > 1)
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe, recipe.Name, "recipe", "results", "Вероятность результата вне диапазона [0, 1]", $"{res.Name}: {res.Probability}");
 
                 if (!knownItems.Contains(res.Name))
                     TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.CrossReference, recipe.Name, "recipe", "results", "Ссылка на неизвестный предмет", res.Name);
@@ -253,6 +293,18 @@ namespace RecipeExtractor.Services
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("\n✓ Все данные прошли проверку успешно!");
                 Console.ResetColor();
+            }
+
+            var topIssues = result.Issues.OrderByDescending(i => i.Severity).ThenBy(i => i.EntityName).Take(15).ToList();
+            if (topIssues.Count > 0)
+            {
+                Console.WriteLine($"\nТоп-{Math.Min(15, topIssues.Count)} проблем:");
+                foreach (var issue in topIssues)
+                {
+                    Console.ForegroundColor = issue.Severity switch { ValidationSeverity.Error => ConsoleColor.Red, ValidationSeverity.Warning => ConsoleColor.Yellow, _ => ConsoleColor.Gray };
+                    Console.WriteLine($"  {issue}");
+                    Console.ResetColor();
+                }
             }
         }
     }
