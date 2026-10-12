@@ -1,5 +1,4 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
 		<TargetFramework>net8.0</TargetFramework>
@@ -7,14 +6,12 @@
 		<Nullable>enable</Nullable>
 		<AssemblyName>RecipeExtractor</AssemblyName>
 		<RootNamespace>RecipeExtractor</RootNamespace>
-		<!-- Подавление предупреждения о лицензии SixLabors для некоммерческого использования -->
 		<SixLaborsLicenseKey>FREE</SixLaborsLicenseKey>
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SixLabors.ImageSharp" Version="4.1.3" />
+		<PackageReference Include="SixLabors.ImageSharp" Version="3.1.7" />
 		<PackageReference Include="MoonSharp" Version="2.0.0" />
 		<PackageReference Include="System.IO.Hashing" Version="10.0.12" />
 	</ItemGroup>
-
 </Project>

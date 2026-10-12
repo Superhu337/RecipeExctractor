@@ -17,7 +17,6 @@ def fix_recipes_structure(recipes):
     for recipe in recipes:
         props = recipe.get("properties", {})
         
-        # 1. Исправляем пустые results
         if not recipe.get("results"):
             if "results" in props and props["results"]:
                 recipe["results"] = props["results"]
@@ -26,7 +25,6 @@ def fix_recipes_structure(recipes):
             elif "normal" in props and "result" in props["normal"]:
                 recipe["results"] = [{"name": props["normal"]["result"], "amount": 1, "type": "item"}]
                 
-        # 2. Исправляем пустые ingredients
         if not recipe.get("ingredients"):
             if "ingredients" in props and props["ingredients"]:
                 recipe["ingredients"] = props["ingredients"]
@@ -35,12 +33,22 @@ def fix_recipes_structure(recipes):
                 
     return recipes
 
-def main():
-    # Пути к вашим файлам
-    recipes_path = 'recipes.json'
-    items_path = 'items.json'
+def main(base):
+    recipes_path = os.path.join(base, 'recipes.json')
+    items_path = os.path.join(base, 'items.json')
     
-    # Загрузка данных
+    recipes_out_path = os.path.join(base, 'recipes_cleaned.json')
+    items_out_path = os.path.join(base, 'items_cleaned.json')
+    
+    # Проверка существования файлов (для отладки)
+    if not os.path.exists(recipes_path):
+        print(f"Файл не найден: {recipes_path}")
+        print(f"Текущая рабочая директория: {os.getcwd()}")
+        return
+    if not os.path.exists(items_path):
+        print(f"Файл не найден: {items_path}")
+        return
+
     with open(recipes_path, 'r', encoding='utf-8') as f:
         recipes = json.load(f)
     with open(items_path, 'r', encoding='utf-8') as f:
@@ -53,13 +61,19 @@ def main():
     print("Нормализация структуры рецептов...")
     recipes = fix_recipes_structure(recipes)
     
-    # Сохранение очищенных файлов
-    with open('recipes_cleaned.json', 'w', encoding='utf-8') as f:
+    with open(recipes_out_path, 'w', encoding='utf-8') as f:
         json.dump(recipes, f, ensure_ascii=False, indent=2)
-    with open('items_cleaned.json', 'w', encoding='utf-8') as f:
+    with open(items_out_path, 'w', encoding='utf-8') as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
         
-    print("Готово! Созданы файлы recipes_cleaned.json и items_cleaned.json")
+    print(f"Готово! Созданы файлы:\n- {recipes_out_path}\n- {items_out_path}")
 
 if __name__ == "__main__":
-    main()
+    # Получаем папку, в которой лежит script.py (...\RecipeExctractor\RecipeExctractor)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Спускаемся вниз: bin -> Debug -> net8.0 -> FactoroData
+    # Обратите внимание: без "..", и добавлена папка "FactoroData"
+    base = os.path.join(script_dir, "bin", "Debug", "net8.0", "FactorioData")
+    
+    main(base)

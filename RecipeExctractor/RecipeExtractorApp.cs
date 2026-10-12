@@ -55,7 +55,7 @@ namespace RecipeExtractor
                 var processedRecipeIcons = new HashSet<string>();
                 foreach (var item in items.Where(i => i.Properties.ContainsKey("auto_generated")))
                 {
-                    if (!string.IsNullOrEmpty(item.IconFileName) && !File.Exists(item.IconFileName))
+                    if (!string.IsNullOrEmpty(item.IconPath) && !File.Exists(item.IconPath))
                     {
                         // Пытаемся найти иконку по имени предмета
                         var possibleIconPath = Path.Combine(_factorioPath, "data", $"base/graphics/icons/{item.Name}.png");
@@ -64,7 +64,7 @@ namespace RecipeExtractor
                             var IconFileName = await _iconExtractor.ExtractIconAsync(possibleIconPath, item.Name);
                             if (IconFileName != null)
                             {
-                                item.IconFileName = IconFileName;
+                                item.IconPath = IconFileName;
                                 extractedIconPaths.Add(IconFileName);
                                 stubIconCount++;
                             }

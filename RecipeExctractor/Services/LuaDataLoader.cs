@@ -136,9 +136,9 @@ namespace RecipeExtractor.Services
                         {
                             items.Add(item);
                             // Сохраняем иконку предмета для использования в рецептах
-                            if (!string.IsNullOrEmpty(item.IconFileName) && !string.IsNullOrEmpty(item.Name))
+                            if (!string.IsNullOrEmpty(item.IconPath) && !string.IsNullOrEmpty(item.Name))
                             {
-                                _itemIcons[item.Name] = item.IconFileName;
+                                _itemIcons[item.Name] = item.IconPath;
                             }
                         }
                     }
@@ -189,7 +189,7 @@ namespace RecipeExtractor.Services
                 if (nameVal.Type == DataType.String) item.Name = nameVal.String ?? string.Empty;
 
                 var iconVal = table.Get("icon");
-                if (iconVal.Type == DataType.String) item.IconFileName = iconVal.String ?? string.Empty;
+                if (iconVal.Type == DataType.String) item.IconPath = iconVal.String ?? string.Empty;
 
                 var iconSizeVal = table.Get("icon_size");
                 if (iconSizeVal.Type == DataType.Number) item.IconSize = iconSizeVal.Number.ToString();
