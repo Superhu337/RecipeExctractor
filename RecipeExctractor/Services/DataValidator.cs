@@ -13,7 +13,90 @@ namespace RecipeExtractor.Services
             _extractedIconPaths = extractedIconPaths ?? new HashSet<string>();
         }
 
-        public ValidationResult Validate(List<Item> items, List<Recipe> recipes)
+        /// <summary>
+        /// Находит предметы, на которые ссылаются рецепты, но которых нет в списке.
+        /// Создает для них заглушки с автоматическим определением пути к иконке.
+        /// </summary>
+        private List<Item> ResolveMissingItems(List<Item> items, List<Recipe> recipes)
+        {
+            var existingNames = new HashSet<string>(items.Select(i => i.Name));
+            var referencedNames = new HashSet<string>();
+
+            // Собираем все имена предметов из рецептов
+            foreach (var recipe in recipes)
+            {
+                foreach (var ing in recipe.Ingredients)
+                    if (!string.IsNullOrEmpty(ing.Name)) referencedNames.Add(ing.Name);
+                foreach (var res in recipe.Results)
+                    if (!string.IsNullOrEmpty(res.Name)) referencedNames.Add(res.Name);
+            }
+
+            // Находим отсутствующие предметы
+            var missingNames = referencedNames.Where(n => !existingNames.Contains(n)).ToList();
+
+            if (missingNames.Count == 0)
+                return new List<Item>();
+
+            Console.WriteLine($"\nНайдено {missingNames.Count} отсутствующих предметов, создаю заглушки...");
+
+            var stubItems = new List<Item>();
+            foreach (var name in missingNames)
+            {
+                // Пытаемся найти иконку по стандартному пути
+                var IconFileName = TryFindIconForItem(name);
+
+                var stub = new Item
+                {
+                    Name = name,
+                    Type = "item",
+                    IconFileName = IconFileName ?? string.Empty,
+                    StackSize = 100,
+                    Subgroup = "other",
+                    Order = $"z[auto-generated]-{name}",
+                    Properties = new Dictionary<string, object>
+                    {
+                        ["type"] = "item",
+                        ["name"] = name,
+                        ["auto_generated"] = true,
+                        ["note"] = "Предмет не был извлечен из data.raw, создана заглушка"
+                    }
+                };
+
+                stubItems.Add(stub);
+                Console.WriteLine($"  + Создана заглушка: {name} (иконка: {(IconFileName != null ? "найдена" : "не найдена")})");
+            }
+
+            return stubItems;
+        }
+
+        /// <summary>
+        /// Пытается найти иконку предмета по стандартным путям Factorio.
+        /// </summary>
+        private string? TryFindIconForItem(string itemName)
+        {
+            // Стандартные пути к иконкам в Factorio
+            var possiblePaths = new[]
+            {
+        $"base/graphics/icons/{itemName}.png",
+        $"base/graphics/icons/fluid/{itemName}.png",
+        $"base/graphics/icons/equipment/{itemName}.png",
+        $"base/graphics/icons/technology/{itemName}.png"
+    };
+
+            foreach (var relativePath in possiblePaths)
+            {
+                var fullPath = Path.Combine(_factorioPath, "data", relativePath);
+                if (File.Exists(fullPath))
+                {
+                    return fullPath;
+                }
+            }
+
+            return null;
+        }
+
+        public ValidationResult Validate(List<Item> items, List<Recipe> recipes,
+            HashSet<ValidationSeverity>? severityFilter = null)
         {
             var result = new ValidationResult
             {
@@ -23,21 +106,41 @@ namespace RecipeExtractor.Services
 
             Console.WriteLine("\n=== Запуск самопроверки данных ===");
 
-            // Сбор всех известных имён предметов для перекрёстных ссылок
+            if (severityFilter != null && severityFilter.Count > 0)
+            {
+                var modeNames = severityFilter.Select(s => s.ToString()).ToList();
+                Console.WriteLine($"Режим фильтрации: [{string.Join(", ", modeNames)}]");
+            }
+            else
+            {
+                Console.WriteLine("Режим фильтрации: ВСЕ проверки");
+            }
+
+            // === НОВЫЙ КОД: Разрешение отсутствующих предметов ===
+            var missingItems = ResolveMissingItems(items, recipes);
+            if (missingItems.Count > 0)
+            {
+                items.AddRange(missingItems);
+                result.TotalItems = items.Count;
+                Console.WriteLine($"Добавлено {missingItems.Count} заглушек к списку предметов");
+            }
+            // ====================================================
+
             var knownItemNames = new HashSet<string>(
                 items.Select(i => i.Name).Where(n => !string.IsNullOrEmpty(n))
             );
 
-            ValidateItems(items, knownItemNames, result);
-            ValidateRecipes(recipes, knownItemNames, result);
-            ValidateCrossReferences(items, recipes, knownItemNames, result);
+            ValidateItems(items, knownItemNames, result, severityFilter);
+            ValidateRecipes(recipes, knownItemNames, result, severityFilter);
+            ValidateCrossReferences(items, recipes, knownItemNames, result, severityFilter);
 
-            PrintSummary(result);
+            PrintSummary(result, severityFilter);
 
             return result;
         }
 
-        private void ValidateItems(List<Item> items, HashSet<string> knownNames, ValidationResult result)
+        private void ValidateItems(List<Item> items, HashSet<string> knownNames,
+            ValidationResult result, HashSet<ValidationSeverity>? filter)
         {
             Console.WriteLine("Проверка предметов...");
 
@@ -47,92 +150,68 @@ namespace RecipeExtractor.Services
 
             foreach (var item in items)
             {
-                // Проверка имени
                 if (string.IsNullOrWhiteSpace(item.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Error, ValidationCategory.Item,
-                        "[без имени]", item.Type, "name",
-                        "Предмет без имени",
-                        $"Тип: {item.Type}");
+                    TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Item,
+                        "[без имени]", item.Type, "name", "Предмет без имени", $"Тип: {item.Type}");
                     continue;
                 }
 
-                // Проверка дубликатов
                 if (!seenNames.Add(item.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Item,
-                        item.Name, item.Type, "name",
-                        "Дублирующееся имя предмета",
-                        $"Тип: {item.Type}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
+                        item.Name, item.Type, "name", "Дублирующееся имя предмета", $"Тип: {item.Type}");
                 }
 
-                // Проверка типа
                 if (string.IsNullOrWhiteSpace(item.Type))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Item,
-                        item.Name, item.Type, "type",
-                        "Отсутствует тип предмета");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
+                        item.Name, item.Type, "type", "Отсутствует тип предмета");
                 }
 
-                // Проверка иконки
                 if (string.IsNullOrWhiteSpace(item.IconFileName))
                 {
                     itemsWithoutIcon.Add(item.Name);
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Item,
-                        item.Name, item.Type, "icon",
-                        "Отсутствует путь к иконке");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
+                        item.Name, item.Type, "icon", "Отсутствует путь к иконке");
                 }
                 else if (!File.Exists(item.IconFileName))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Icon,
-                        item.Name, item.Type, "icon",
-                        "Файл иконки не найден на диске",
-                        item.IconFileName);
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Icon,
+                        item.Name, item.Type, "icon", "Файл иконки не найден на диске", item.IconFileName);
                 }
 
-                // Проверка размера стака
                 if (item.StackSize <= 0)
                 {
-                    result.AddIssue(ValidationSeverity.Info, ValidationCategory.Item,
-                        item.Name, item.Type, "stack_size",
-                        "Размер стака не задан или равен 0",
-                        $"Значение: {item.StackSize}");
+                    TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.Item,
+                        item.Name, item.Type, "stack_size", "Размер стака не задан или равен 0", $"Значение: {item.StackSize}");
                 }
-                else if (item.StackSize > 10000)
+                else if (item.StackSize > 10001)
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Item,
-                        item.Name, item.Type, "stack_size",
-                        "Подозрительно большой размер стака",
-                        $"Значение: {item.StackSize}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Item,
+                        item.Name, item.Type, "stack_size", "Подозрительно большой размер стака", $"Значение: {item.StackSize}");
                 }
 
-                // Проверка subgroup
                 if (string.IsNullOrWhiteSpace(item.Subgroup))
                 {
                     itemsWithoutSubgroup.Add(item.Name);
                 }
 
-                // Проверка order
                 if (string.IsNullOrWhiteSpace(item.Order))
                 {
-                    result.AddIssue(ValidationSeverity.Info, ValidationCategory.Item,
-                        item.Name, item.Type, "order",
-                        "Отсутствует поле order (сортировка)");
+                    TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.Item,
+                        item.Name, item.Type, "order", "Отсутствует поле order (сортировка)");
                 }
             }
 
-            // Сводка по предметам без иконок
             if (itemsWithoutIcon.Count > 0)
-            {
                 Console.WriteLine($"  Предметов без иконки: {itemsWithoutIcon.Count}");
-            }
             if (itemsWithoutSubgroup.Count > 0)
-            {
                 Console.WriteLine($"  Предметов без subgroup: {itemsWithoutSubgroup.Count}");
-            }
         }
 
-        private void ValidateRecipes(List<Recipe> recipes, HashSet<string> knownItems, ValidationResult result)
+        private void ValidateRecipes(List<Recipe> recipes, HashSet<string> knownItems,
+            ValidationResult result, HashSet<ValidationSeverity>? filter)
         {
             Console.WriteLine("Проверка рецептов...");
 
@@ -142,116 +221,83 @@ namespace RecipeExtractor.Services
 
             foreach (var recipe in recipes)
             {
-                // Проверка имени
                 if (string.IsNullOrWhiteSpace(recipe.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Error, ValidationCategory.Recipe,
-                        "[без имени]", "recipe", "name",
-                        "Рецепт без имени");
+                    TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Recipe,
+                        "[без имени]", "recipe", "name", "Рецепт без имени");
                     continue;
                 }
 
-                // Проверка дубликатов
                 if (!seenNames.Add(recipe.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "name",
-                        "Дублирующееся имя рецепта");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "name", "Дублирующееся имя рецепта");
                 }
 
-                // Проверка энергии
                 if (recipe.EnergyRequired <= 0)
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "energy_required",
-                        "Время создания <= 0",
-                        $"Значение: {recipe.EnergyRequired}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "energy_required", "Время создания <= 0", $"Значение: {recipe.EnergyRequired}");
                 }
                 else if (recipe.EnergyRequired > 1000)
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "energy_required",
-                        "Подозрительно большое время создания",
-                        $"Значение: {recipe.EnergyRequired}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "energy_required", "Подозрительно большое время создания", $"Значение: {recipe.EnergyRequired}");
                 }
 
-                // Проверка ингредиентов
                 if (recipe.Ingredients == null || recipe.Ingredients.Count == 0)
                 {
                     recipesWithEmptyIngredients.Add(recipe.Name);
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "ingredients",
-                        "Рецепт не имеет ингредиентов");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "ingredients", "Рецепт не имеет ингредиентов");
                 }
                 else
                 {
-                    ValidateIngredients(recipe, knownItems, result);
+                    ValidateIngredients(recipe, knownItems, result, filter);
                 }
 
-                // Проверка результатов (теперь корректно обрабатываются оба формата)
                 if (recipe.Results == null || recipe.Results.Count == 0)
                 {
-                    // Проверяем формат рецепта
-                    if (recipe.RecipeFormat == "unknown")
+                    bool hasOldFormatResult = recipe.Properties.ContainsKey("result");
+
+                    if (!hasOldFormatResult)
                     {
                         recipesWithEmptyResults.Add(recipe.Name);
-                        result.AddIssue(ValidationSeverity.Error, ValidationCategory.Recipe,
-                            recipe.Name, "recipe", "results",
-                            "Рецепт не имеет результатов (неизвестный формат)");
+                        TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Recipe,
+                            recipe.Name, "recipe", "results", "Рецепт не имеет результатов");
                     }
                     else
                     {
-                        result.AddIssue(ValidationSeverity.Info, ValidationCategory.Recipe,
-                            recipe.Name, "recipe", "results",
-                            $"Рецепт использует формат '{recipe.RecipeFormat}' без результатов");
+                        TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.Recipe,
+                            recipe.Name, "recipe", "results", "Рецепт использует старый формат (поле result вместо results)");
                     }
                 }
                 else
                 {
-                    ValidateResults(recipe, knownItems, result);
+                    ValidateResults(recipe, knownItems, result, filter);
                 }
 
-                // Проверка главного продукта
                 if (string.IsNullOrEmpty(recipe.MainProduct) && recipe.Results.Count > 0)
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "main_product",
-                        "Не определен главный продукт рецепта");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "main_product", "Не определен главный продукт рецепта");
                 }
 
-                // Проверка несоответствия имени рецепта и результата
-                if (recipe.Results.Count == 1 && recipe.RecipeFormat == "single")
+                if (string.IsNullOrWhiteSpace(recipe.RecipeIconPath))
                 {
-                    var singleResult = recipe.Results[0];
-                    if (singleResult.Name != recipe.Name && singleResult.Amount == 1)
-                    {
-                        result.AddIssue(ValidationSeverity.Info, ValidationCategory.Recipe,
-                            recipe.Name, "recipe", "name_mismatch",
-                            "Имя рецепта не совпадает с результатом (возможно, это нормально)",
-                            $"Рецепт: {recipe.Name}, Результат: {singleResult.Name}");
-                    }
-                }
-
-                // Проверка иконки рецепта
-                if (string.IsNullOrWhiteSpace(recipe.IconFileName))
-                {
-                    result.AddIssue(ValidationSeverity.Info, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "icon",
-                        "Рецепт не имеет собственной иконки (используется иконка результата)");
+                    TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "icon", "Рецепт не имеет собственной иконки (используется иконка результата)");
                 }
             }
 
             if (recipesWithEmptyIngredients.Count > 0)
-            {
                 Console.WriteLine($"  Рецептов без ингредиентов: {recipesWithEmptyIngredients.Count}");
-            }
             if (recipesWithEmptyResults.Count > 0)
-            {
                 Console.WriteLine($"  Рецептов без результатов: {recipesWithEmptyResults.Count}");
-            }
         }
 
-        private void ValidateIngredients(Recipe recipe, HashSet<string> knownItems, ValidationResult result)
+        private void ValidateIngredients(Recipe recipe, HashSet<string> knownItems,
+            ValidationResult result, HashSet<ValidationSeverity>? filter)
         {
             var seenIngredients = new HashSet<string>();
 
@@ -259,42 +305,33 @@ namespace RecipeExtractor.Services
             {
                 if (string.IsNullOrWhiteSpace(ingredient.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Error, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "ingredients",
-                        "Ингредиент без имени");
+                    TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "ingredients", "Ингредиент без имени");
                     continue;
                 }
 
-                // Проверка дубликатов в одном рецепте
                 if (!seenIngredients.Add(ingredient.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "ingredients",
-                        "Дублирующийся ингредиент в рецепте",
-                        $"Ингредиент: {ingredient.Name}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "ingredients", "Дублирующийся ингредиент в рецепте", $"Ингредиент: {ingredient.Name}");
                 }
 
-                // Проверка количества
                 if (ingredient.Amount <= 0)
                 {
-                    result.AddIssue(ValidationSeverity.Error, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "ingredients",
-                        "Количество ингредиента <= 0",
-                        $"{ingredient.Name}: {ingredient.Amount}");
+                    TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "ingredients", "Количество ингредиента <= 0", $"{ingredient.Name}: {ingredient.Amount}");
                 }
 
-                // Проверка ссылки на известный предмет
                 if (!knownItems.Contains(ingredient.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.CrossReference,
-                        recipe.Name, "recipe", "ingredients",
-                        "Ингредиент ссылается на неизвестный предмет",
-                        $"Неизвестный предмет: {ingredient.Name}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.CrossReference,
+                        recipe.Name, "recipe", "ingredients", "Ингредиент ссылается на неизвестный предмет", $"Неизвестный предмет: {ingredient.Name}");
                 }
             }
         }
 
-        private void ValidateResults(Recipe recipe, HashSet<string> knownItems, ValidationResult result)
+        private void ValidateResults(Recipe recipe, HashSet<string> knownItems,
+            ValidationResult result, HashSet<ValidationSeverity>? filter)
         {
             var seenResults = new HashSet<string>();
 
@@ -302,52 +339,42 @@ namespace RecipeExtractor.Services
             {
                 if (string.IsNullOrWhiteSpace(resultItem.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Error, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "results",
-                        "Результат без имени");
+                    TryAddIssue(result, filter, ValidationSeverity.Error, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "results", "Результат без имени");
                     continue;
                 }
 
                 if (!seenResults.Add(resultItem.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "results",
-                        "Дублирующийся результат в рецепте",
-                        $"Результат: {resultItem.Name}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "results", "Дублирующийся результат в рецепте", $"Результат: {resultItem.Name}");
                 }
 
                 if (resultItem.Amount <= 0)
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "results",
-                        "Количество результата <= 0",
-                        $"{resultItem.Name}: {resultItem.Amount}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "results", "Количество результата <= 0", $"{resultItem.Name}: {resultItem.Amount}");
                 }
 
                 if (resultItem.Probability < 0 || resultItem.Probability > 1)
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.Recipe,
-                        recipe.Name, "recipe", "results",
-                        "Вероятность результата вне диапазона [0, 1]",
-                        $"{resultItem.Name}: {resultItem.Probability}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.Recipe,
+                        recipe.Name, "recipe", "results", "Вероятность результата вне диапазона [0, 1]", $"{resultItem.Name}: {resultItem.Probability}");
                 }
 
                 if (!knownItems.Contains(resultItem.Name))
                 {
-                    result.AddIssue(ValidationSeverity.Warning, ValidationCategory.CrossReference,
-                        recipe.Name, "recipe", "results",
-                        "Результат ссылается на неизвестный предмет",
-                        $"Неизвестный предмет: {resultItem.Name}");
+                    TryAddIssue(result, filter, ValidationSeverity.Warning, ValidationCategory.CrossReference,
+                        recipe.Name, "recipe", "results", "Результат ссылается на неизвестный предмет", $"Неизвестный предмет: {resultItem.Name}");
                 }
             }
         }
 
         private void ValidateCrossReferences(List<Item> items, List<Recipe> recipes,
-            HashSet<string> knownItems, ValidationResult result)
+            HashSet<string> knownItems, ValidationResult result, HashSet<ValidationSeverity>? filter)
         {
             Console.WriteLine("Проверка перекрёстных ссылок...");
 
-            // Предметы, на которые ссылаются рецепты
             var referencedItems = new HashSet<string>();
             foreach (var recipe in recipes)
             {
@@ -357,7 +384,6 @@ namespace RecipeExtractor.Services
                     if (!string.IsNullOrEmpty(res.Name)) referencedItems.Add(res.Name);
             }
 
-            // Предметы, на которые никто не ссылается (кроме самих предметов)
             var unreferencedItems = items
                 .Where(i => !string.IsNullOrEmpty(i.Name) && !referencedItems.Contains(i.Name))
                 .ToList();
@@ -365,22 +391,19 @@ namespace RecipeExtractor.Services
             if (unreferencedItems.Count > 0)
             {
                 Console.WriteLine($"  Предметов, не используемых в рецептах: {unreferencedItems.Count}");
-                // Выводим только первые 20, чтобы не засорять консоль
+
                 foreach (var item in unreferencedItems.Take(20))
                 {
-                    result.AddIssue(ValidationSeverity.Info, ValidationCategory.CrossReference,
-                        item.Name, item.Type, "usage",
-                        "Предмет не используется ни в одном рецепте");
+                    TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.CrossReference,
+                        item.Name, item.Type, "usage", "Предмет не используется ни в одном рецепте");
                 }
                 if (unreferencedItems.Count > 20)
                 {
-                    result.AddIssue(ValidationSeverity.Info, ValidationCategory.CrossReference,
-                        "[множество]", "item", "usage",
-                        $"И ещё {unreferencedItems.Count - 20} предметов не используются в рецептах");
+                    TryAddIssue(result, filter, ValidationSeverity.Info, ValidationCategory.CrossReference,
+                        "[множество]", "item", "usage", $"И ещё {unreferencedItems.Count - 20} предметов не используются в рецептах");
                 }
             }
 
-            // Неизвестные предметы, на которые ссылаются рецепты (уже добавлены в ValidateIngredients/Results)
             var unknownReferenced = referencedItems.Where(r => !knownItems.Contains(r)).ToList();
             if (unknownReferenced.Count > 0)
             {
@@ -388,12 +411,26 @@ namespace RecipeExtractor.Services
             }
         }
 
-        private void PrintSummary(ValidationResult result)
+        /// <summary>
+        /// Добавляет проблему только если её severity разрешён фильтром.
+        /// Если фильтр null или пустой — добавляет всегда.
+        /// </summary>
+        private void TryAddIssue(ValidationResult result, HashSet<ValidationSeverity>? filter,
+            ValidationSeverity severity, ValidationCategory category,
+            string entityName, string entityType, string field, string message, string details = "")
+        {
+            if (filter != null && filter.Count > 0 && !filter.Contains(severity))
+                return;
+
+            result.AddIssue(severity, category, entityName, entityType, field, message, details);
+        }
+
+        private void PrintSummary(ValidationResult result, HashSet<ValidationSeverity>? filter)
         {
             Console.WriteLine("\n=== Результаты самопроверки ===");
             Console.WriteLine($"Всего предметов: {result.TotalItems}");
             Console.WriteLine($"Всего рецептов: {result.TotalRecipes}");
-            Console.WriteLine($"Найдено проблем: {result.Issues.Count}");
+            Console.WriteLine($"Найдено проблем (после фильтрации): {result.Issues.Count}");
             Console.WriteLine($"  • Ошибок (Error):      {result.ErrorCount}");
             Console.WriteLine($"  • Предупреждений:      {result.WarningCount}");
             Console.WriteLine($"  • Информационных:      {result.InfoCount}");
@@ -401,13 +438,19 @@ namespace RecipeExtractor.Services
             if (result.HasErrors)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("\n✗ ОБНАРУЖЕНЫ КРИТИЧЕСКИЕ ОШИБКИ!");
+                Console.WriteLine("\n ОБНАРУЖЕНЫ КРИТИЧЕСКИЕ ОШИБКИ!");
                 Console.ResetColor();
             }
             else if (result.WarningCount > 0)
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("\n⚠ Есть предупреждения, но данные в целом корректны.");
+                Console.ResetColor();
+            }
+            else if (result.Issues.Count > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("\nℹ Найдены только информационные сообщения.");
                 Console.ResetColor();
             }
             else
@@ -417,7 +460,7 @@ namespace RecipeExtractor.Services
                 Console.ResetColor();
             }
 
-            // Выводим топ-10 самых серьёзных проблем
+            // Выводим топ-15 самых серьёзных проблем
             var topIssues = result.Issues
                 .OrderByDescending(i => i.Severity)
                 .ThenBy(i => i.EntityName)
@@ -426,7 +469,7 @@ namespace RecipeExtractor.Services
 
             if (topIssues.Count > 0)
             {
-                Console.WriteLine("\nТоп-15 проблем:");
+                Console.WriteLine($"\nТоп-{Math.Min(15, topIssues.Count)} проблем:");
                 foreach (var issue in topIssues)
                 {
                     Console.ForegroundColor = issue.Severity switch

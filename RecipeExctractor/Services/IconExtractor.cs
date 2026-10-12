@@ -48,13 +48,16 @@ namespace RecipeExtractor.Services
 
                 if (fullPath != null && File.Exists(fullPath))
                 {
-                    // Используем iconFileName если он предоставлен, иначе имя предмета
                     var fileName = iconFileName ?? $"{SanitizeFileName(itemName)}.png";
                     var outputPath = Path.Combine(_outputPath, fileName);
 
-                    using (var image = await Image.LoadAsync(fullPath))
+                    // Проверяем, не существует ли уже файл
+                    if (!File.Exists(outputPath))
                     {
-                        await image.SaveAsPngAsync(outputPath);
+                        using (var image = await Image.LoadAsync(fullPath))
+                        {
+                            await image.SaveAsPngAsync(outputPath);
+                        }
                     }
 
                     return outputPath;
