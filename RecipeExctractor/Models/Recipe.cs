@@ -11,20 +11,16 @@ namespace RecipeExtractor.Models
 
         public string? MainProduct { get; set; }
         public string RecipeFormat { get; set; } = "unknown";
-
-        // Игровой путь иконки рецепта (если есть)
         public string? RecipeIconPath { get; set; }
-
-        // Игровой путь иконки главного продукта
         public string? ProductIconPath { get; set; }
-
-        // Физический путь на диске
         public string? PhysicalIconPath { get; set; }
-
-        // Путь к скопированной иконке
         public string? CopiedIconPath { get; set; }
-
         public string IconFileName { get; set; } = string.Empty;
+
+        // === КРИТИЧНО: Поле для совместимости с LuaDataLoader ===
+        public string IconPath { get; set; } = string.Empty;
+        // ========================================================
+
         public string IconSize { get; set; } = string.Empty;
         public bool Enabled { get; set; } = true;
         public Dictionary<string, object> Properties { get; set; } = new();

@@ -1,9 +1,9 @@
 ﻿using MoonSharp.Interpreter;
 using RecipeExtractor.Models;
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-//using RecipeExtractor.Services;
-
+using System.Text.RegularExpressions;
 namespace RecipeExtractor.Services
 {
     public class LuaDataLoader
@@ -12,12 +12,13 @@ namespace RecipeExtractor.Services
         private readonly string _modsPath;
         private readonly Script _luaScript;
         private readonly FactorioPathResolver _pathResolver;
-        private readonly Dictionary<string, string> _itemIconPaths = new(); // name → game icon path
+        private readonly Dictionary<string, string> _itemIconPaths = new();
+        private readonly List<string> _requireRoots = new();
+        private string _tempModsDir = "";
 
-        // Папки, которые нужно пропускать при загрузке Lua (они используют runtime API Factorio)
         private static readonly HashSet<string> SkipFolders = new(StringComparer.OrdinalIgnoreCase)
         {
-            "campaigns", "scenarios", "tutorials"
+            "campaigns", "scenarios", "tutorials", "locale", "migrations"
         };
 
         public LuaDataLoader(string factorioPath, string modsPath)
@@ -36,15 +37,56 @@ namespace RecipeExtractor.Services
             dataTable.Set("raw", DynValue.NewTable(dataRawTable));
             _luaScript.Globals.Set("data", DynValue.NewTable(dataTable));
 
+            _requireRoots.Add(Path.Combine(_factorioPath, "data", "core", "lualib"));
+            _requireRoots.Add(Path.Combine(_factorioPath, "data", "base", "lualib"));
+
+            // Эмуляция util и других runtime-функций Factorio
             _luaScript.DoString(@"
-                function require(module) return {} end
+                if util == nil then util = {} end
+                
+                if util.table == nil then util.table = {} end
+                function util.table.deepcopy(t)
+                    if type(t) ~= 'table' then return t end
+                    local copy = {}
+                    for k,v in pairs(t) do 
+                        copy[util.table.deepcopy(k)] = util.table.deepcopy(v) 
+                    end
+                    return copy
+                end
+                
+                function util.table.merge(a, b)
+                    if not b then return a end
+                    for k,v in pairs(b) do a[k] = v end
+                    return a
+                end
+                
+                function util.next_power_of_2(n)
+                    local p = 1
+                    while p < n do p = p * 2 end
+                    return p
+                end
+                
+                if util.color == nil then util.color = {} end
+                function util.color.fromstring(s) return {r=1,g=1,b=1,a=1} end
+                function util.color.tohex(c) return 'ffffffff' end
+                
+                function helpers() return {} end
+                
+                function require(module)
+                    return {}
+                end
+                
                 function data.extend(items)
                     if type(items) ~= 'table' then return end
                     for _, item in ipairs(items) do
                         local itemType = item.type
                         if itemType then
-                            if not data.raw[itemType] then data.raw[itemType] = {} end
-                            if item.name then data.raw[itemType][item.name] = item end
+                            if not data.raw[itemType] then
+                                data.raw[itemType] = {}
+                            end
+                            if item.name then
+                                data.raw[itemType][item.name] = item
+                            end
                         end
                     end
                 end
@@ -55,41 +97,158 @@ namespace RecipeExtractor.Services
         {
             var corePath = Path.Combine(_factorioPath, "data", "core");
             var basePath = Path.Combine(_factorioPath, "data", "base");
+
             if (Directory.Exists(corePath))
-                await LoadLuaFilesFromDirectoryAsync(corePath, isBaseData: true);
+                await LoadLuaFilesFromDirectoryAsync(corePath);
+
             if (Directory.Exists(basePath))
-                await LoadLuaFilesFromDirectoryAsync(basePath, isBaseData: true);
+                await LoadLuaFilesFromDirectoryAsync(basePath);
         }
 
         public async Task LoadModsAsync()
         {
-            if (!Directory.Exists(_modsPath)) return;
-
-            var modListPath = Path.Combine(_modsPath, "mod-list.json");
-            var enabledMods = new List<string>();
-
-            if (File.Exists(modListPath))
+            if (!Directory.Exists(_modsPath))
             {
-                var modListJson = await File.ReadAllTextAsync(modListPath);
-                var modList = JsonSerializer.Deserialize<ModList>(modListJson);
-                enabledMods = modList?.Mods?
-                    .Where(m => m.Enabled && m.Name != "base")
-                    .Select(m => m.Name).ToList() ?? new List<string>();
+                Console.WriteLine("  Папка модов не найдена: " + _modsPath);
+                return;
             }
 
-            foreach (var modDir in Directory.GetDirectories(_modsPath))
+            var enabled = await ReadEnabledModsAsync();
+            Console.WriteLine($"  Включённых модов: {enabled.Count}");
+
+            _tempModsDir = Path.Combine(Path.GetTempPath(), "RecipeExtractor", "mods");
+            if (Directory.Exists(_tempModsDir))
             {
-                var modName = Path.GetFileName(modDir);
-                if (enabledMods.Contains(modName) || enabledMods.Count == 0)
-                    await LoadLuaFilesFromDirectoryAsync(modDir, isBaseData: false);
+                try { Directory.Delete(_tempModsDir, true); } catch { }
+            }
+            Directory.CreateDirectory(_tempModsDir);
+
+            int loaded = 0;
+            foreach (var zipPath in Directory.GetFiles(_modsPath, "*.zip"))
+            {
+                var archName = Path.GetFileNameWithoutExtension(zipPath);
+                var modName = GetModNameFromArchive(archName);
+
+                if (enabled.Count > 0 && !enabled.Contains(modName)) continue;
+
+                var dest = Path.Combine(_tempModsDir, modName);
+                try
+                {
+                    ZipFile.ExtractToDirectory(zipPath, dest, overwriteFiles: true);
+                    loaded++;
+                    Console.WriteLine($"  ✓ Распакован: {modName}");
+
+                    var libDir = Path.Combine(dest, "lualib");
+                    if (Directory.Exists(libDir))
+                        _requireRoots.Add(libDir);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  ✗ Ошибка распаковки {modName}: {ex.Message}");
+                }
+            }
+
+            foreach (var d in Directory.GetDirectories(_modsPath))
+            {
+                var dirName = Path.GetFileName(d);
+                var modName = GetModNameFromArchive(dirName);
+                if (enabled.Count > 0 && !enabled.Contains(modName)) continue;
+
+                var dest = Path.Combine(_tempModsDir, modName);
+                if (!Directory.Exists(dest))
+                {
+                    CopyDirectory(d, dest);
+                    loaded++;
+                    Console.WriteLine($"  ✓ Скопирована папка мода: {modName}");
+
+                    var libDir = Path.Combine(dest, "lualib");
+                    if (Directory.Exists(libDir))
+                        _requireRoots.Add(libDir);
+                }
+            }
+
+            Console.WriteLine($"  Итого загружено модов: {loaded}");
+
+            // Сначала lualib (хелперы), потом prototypes/data
+            await LoadInOrderAsync(_tempModsDir, phase: "lualib");
+            await LoadInOrderAsync(_tempModsDir, phase: "data");
+        }
+
+        private async Task<HashSet<string>> ReadEnabledModsAsync()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var p = Path.Combine(_modsPath, "mod-list.json");
+            if (!File.Exists(p)) return set;
+
+            try
+            {
+                var json = await File.ReadAllTextAsync(p);
+                var ml = JsonSerializer.Deserialize<ModList>(json);
+                foreach (var m in ml?.Mods ?? new())
+                {
+                    if (m.Enabled &&
+                        !string.Equals(m.Name, "base", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(m.Name, "core", StringComparison.OrdinalIgnoreCase))
+                    {
+                        set.Add(m.Name);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  ⚠ Не удалось прочитать mod-list.json: {ex.Message}");
+            }
+            return set;
+        }
+
+        private async Task LoadInOrderAsync(string root, string phase)
+        {
+            if (!Directory.Exists(root)) return;
+
+            var allFiles = Directory.GetFiles(root, "*.lua", SearchOption.AllDirectories);
+
+            IEnumerable<string> filtered;
+            if (phase == "lualib")
+            {
+                filtered = allFiles.Where(f =>
+                    f.Contains($"{Path.DirectorySeparatorChar}lualib{Path.DirectorySeparatorChar}",
+                               StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                filtered = allFiles.Where(f =>
+                    !f.Contains($"{Path.DirectorySeparatorChar}lualib{Path.DirectorySeparatorChar}",
+                                 StringComparison.OrdinalIgnoreCase) &&
+                    !ShouldSkipFile(f, root));
+            }
+
+            var sorted = filtered
+                .OrderBy(f => GetLoadPriority(Path.GetFileName(f)))
+                .ThenBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            Console.WriteLine($"  [{phase}] Файлов к загрузке: {sorted.Count}");
+
+            foreach (var file in sorted)
+            {
+                try
+                {
+                    var content = await File.ReadAllTextAsync(file);
+                    _luaScript.DoString(content);
+                }
+                catch
+                {
+                    // Тихо пропускаем ошибки
+                }
             }
         }
 
-        private async Task LoadLuaFilesFromDirectoryAsync(string directory, bool isBaseData)
+        private async Task LoadLuaFilesFromDirectoryAsync(string directory)
         {
             var luaFiles = Directory.GetFiles(directory, "*.lua", SearchOption.AllDirectories)
                 .Where(f => !ShouldSkipFile(f, directory))
-                .OrderBy(f => f)
+                .OrderBy(f => GetLoadPriority(Path.GetFileName(f)))
+                .ThenBy(f => f, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
             foreach (var file in luaFiles)
@@ -99,18 +258,13 @@ namespace RecipeExtractor.Services
                     var content = await File.ReadAllTextAsync(file);
                     _luaScript.DoString(content);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    // Тихо пропускаем ошибки — эти файлы используют runtime API Factorio
-                    Console.WriteLine($"[Пропущено] {Path.GetFileName(file)}: {ex.Message}");
+                    // Тихо пропускаем
                 }
             }
         }
 
-        /// <summary>
-        /// Определяет, нужно ли пропустить файл при загрузке.
-        /// Пропускаем файлы из campaigns/, scenarios/, tutorials/, lualib/ и т.д.
-        /// </summary>
         private bool ShouldSkipFile(string filePath, string rootDirectory)
         {
             var relativePath = Path.GetRelativePath(rootDirectory, filePath);
@@ -121,9 +275,40 @@ namespace RecipeExtractor.Services
                 if (SkipFolders.Contains(part))
                     return true;
             }
-
             return false;
         }
+
+        private static int GetLoadPriority(string fileName)
+        {
+            return fileName.ToLowerInvariant() switch
+            {
+                "data.lua" => 0,
+                "data-updates.lua" => 1,
+                "data-final-fixes.lua" => 2,
+                "control.lua" => 99,
+                _ => 50
+            };
+        }
+
+        private static string GetModNameFromArchive(string archiveOrFolderName)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                archiveOrFolderName, @"^(.+?)_\d+\.\d+");
+            return match.Success ? match.Groups[1].Value : archiveOrFolderName;
+        }
+
+        private static void CopyDirectory(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var f in Directory.GetFiles(src))
+                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), true);
+            foreach (var d in Directory.GetDirectories(src))
+                CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d)));
+        }
+
+        // ================================================================
+        // ИЗВЛЕЧЕНИЕ ПРЕДМЕТОВ (включая entity для машин)
+        // ================================================================
 
         public List<Item> GetItems()
         {
@@ -133,9 +318,8 @@ namespace RecipeExtractor.Services
             var dataRaw = dataTable.Table.Get("raw").Table;
             if (dataRaw == null) return items;
 
-            var itemTypes = new[] { "item", "item-with-entity-data", "ammo", "armor",
-                "capsule", "gun", "module", "tool", "fluid", "entity" };
-
+            // Обычные предметы
+            var itemTypes = new[] { "item", "ammo", "armor", "capsule", "gun", "module", "tool", "fluid" };
             foreach (var type in itemTypes)
             {
                 var typeTable = dataRaw.Get(type).Table;
@@ -153,8 +337,114 @@ namespace RecipeExtractor.Services
                     }
                 }
             }
+
+            // Entity (машины, роботы, печи и т.д.)
+            var entityTable = dataRaw.Get("entity").Table;
+            if (entityTable != null)
+            {
+                foreach (var kvp in entityTable.Pairs)
+                {
+                    var entItem = ConvertEntityToItem(kvp.Value);
+                    if (entItem != null)
+                    {
+                        items.Add(entItem);
+                        if (!string.IsNullOrEmpty(entItem.IconPath) && !string.IsNullOrEmpty(entItem.Name))
+                            _itemIconPaths[entItem.Name] = entItem.IconPath;
+                    }
+                }
+            }
+
             return items;
         }
+
+        private Item? ConvertEntityToItem(DynValue luaEntity)
+        {
+            try
+            {
+                if (luaEntity.Type != DataType.Table) return null;
+                var table = luaEntity.Table;
+
+                var nameVal = table.Get("name");
+                if (nameVal.Type != DataType.String) return null;
+                var name = nameVal.String?.Trim() ?? string.Empty;
+                if (string.IsNullOrEmpty(name)) return null;
+
+                // Ищем иконку напрямую у сущности
+                string? iconPath = null;
+                var iconVal = table.Get("icon");
+                if (iconVal.Type == DataType.String)
+                {
+                    iconPath = NormalizeGamePath(iconVal.String);
+                }
+                else
+                {
+                    var iconsVal = table.Get("icons");
+                    if (iconsVal.Type == DataType.Table)
+                    {
+                        var firstIcon = iconsVal.Table.Get(DynValue.NewNumber(1));
+                        if (firstIcon.Type == DataType.Table)
+                        {
+                            var ip = firstIcon.Table.Get("icon");
+                            if (ip.Type == DataType.String)
+                                iconPath = NormalizeGamePath(ip.String);
+                        }
+                    }
+                }
+
+                // Если нет иконки у entity, пробуем взять из place_result
+                if (string.IsNullOrEmpty(iconPath))
+                {
+                    var placeResultVal = table.Get("place_result");
+                    if (placeResultVal.Type == DataType.String)
+                    {
+                        var itemName = placeResultVal.String?.Trim();
+                        if (!string.IsNullOrEmpty(itemName) && _itemIconPaths.TryGetValue(itemName, out var storedIcon))
+                        {
+                            iconPath = storedIcon;
+                        }
+                    }
+                }
+
+                // Создаём Item только если нашли иконку
+                if (string.IsNullOrEmpty(iconPath)) return null;
+
+                var item = new Item
+                {
+                    Name = name,
+                    Type = "entity",
+                    IconPath = iconPath,
+                    PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(iconPath),
+                    StackSize = 1,
+                    Subgroup = "other",
+                    Order = $"z[entity]-{name}",
+                    Properties = new Dictionary<string, object>()
+                };
+
+                // Fallback для иконки по имени
+                if (string.IsNullOrEmpty(item.PhysicalIconPath) || !File.Exists(item.PhysicalIconPath))
+                {
+                    var byFile = _pathResolver.FindIconByFileName(item.IconPath);
+                    if (byFile != null) item.PhysicalIconPath = byFile;
+                }
+                if (string.IsNullOrEmpty(item.PhysicalIconPath) || !File.Exists(item.PhysicalIconPath))
+                {
+                    var byName = _pathResolver.FindIconByName(item.Name);
+                    if (byName != null)
+                    {
+                        item.PhysicalIconPath = byName;
+                        if (string.IsNullOrEmpty(item.IconPath))
+                            item.IconPath = "__base__/graphics/entity/" + item.Name + "/" + item.Name + ".png";
+                    }
+                }
+
+                return item;
+            }
+            catch { return null; }
+        }
+
+        // ================================================================
+        // ИЗВЛЕЧЕНИЕ РЕЦЕПТОВ (с поддержкой normal/expensive)
+        // ================================================================
 
         public List<Recipe> GetRecipes()
         {
@@ -176,71 +466,6 @@ namespace RecipeExtractor.Services
             return recipes;
         }
 
-        private Item? ConvertToItem(DynValue luaItem, string type)
-        {
-            try
-            {
-                if (luaItem.Type != DataType.Table) return null;
-                var table = luaItem.Table;
-                var item = new Item { Type = type };
-
-                var nameVal = table.Get("name");
-                if (nameVal.Type == DataType.String) item.Name = nameVal.String?.Trim() ?? string.Empty;
-
-                // Парсим иконку — может быть icon (строка) или icons (таблица)
-                var iconVal = table.Get("icon");
-                if (iconVal.Type == DataType.String)
-                {
-                    item.IconPath = iconVal.String?.Trim() ?? string.Empty;
-                    item.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(item.IconPath);
-                }
-                else
-                {
-                    // Пробуем icons[1].icon
-                    var iconsVal = table.Get("icons");
-                    if (iconsVal.Type == DataType.Table)
-                    {
-                        var firstIcon = iconsVal.Table.Get(DynValue.NewNumber(1));
-                        if (firstIcon.Type == DataType.Table)
-                        {
-                            var iconPathVal = firstIcon.Table.Get("icon");
-                            if (iconPathVal.Type == DataType.String)
-                            {
-                                item.IconPath = iconPathVal.String?.Trim() ?? string.Empty;
-                                item.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(item.IconPath);
-                            }
-                        }
-                    }
-                }
-
-                var iconSizeVal = table.Get("icon_size");
-                if (iconSizeVal.Type == DataType.Number) item.IconSize = iconSizeVal.Number.ToString();
-
-                var stackSizeVal = table.Get("stack_size");
-                if (stackSizeVal.Type == DataType.Number) item.StackSize = Convert.ToInt32(stackSizeVal.Number);
-
-                var subgroupVal = table.Get("subgroup");
-                if (subgroupVal.Type == DataType.String) item.Subgroup = subgroupVal.String?.Trim() ?? string.Empty;
-
-                var orderVal = table.Get("order");
-                if (orderVal.Type == DataType.String) item.Order = orderVal.String?.Trim() ?? string.Empty;
-
-                item.Properties = new Dictionary<string, object>();
-                foreach (var kvp in table.Pairs)
-                {
-                    if (kvp.Key.Type == DataType.String)
-                    {
-                        var key = kvp.Key.String?.Trim() ?? string.Empty;
-                        if (!string.IsNullOrEmpty(key))
-                            item.Properties[key] = ConvertDynValueToObject(kvp.Value) ?? string.Empty;
-                    }
-                }
-
-                return string.IsNullOrEmpty(item.Name) ? null : item;
-            }
-            catch { return null; }
-        }
-
         private Recipe? ConvertToRecipe(DynValue luaRecipe)
         {
             try
@@ -250,7 +475,8 @@ namespace RecipeExtractor.Services
                 var recipe = new Recipe();
 
                 var nameVal = table.Get("name");
-                if (nameVal.Type == DataType.String) recipe.Name = nameVal.String?.Trim() ?? string.Empty;
+                if (nameVal.Type == DataType.String)
+                    recipe.Name = nameVal.String?.Trim() ?? string.Empty;
 
                 var categoryVal = table.Get("category");
                 recipe.Category = categoryVal.Type == DataType.String
@@ -264,35 +490,54 @@ namespace RecipeExtractor.Services
                 var iconVal = table.Get("icon");
                 if (iconVal.Type == DataType.String)
                 {
-                    recipe.RecipeIconPath = iconVal.String?.Trim();
-                    recipe.RecipeIconPath = recipe.RecipeIconPath ?? string.Empty;
+					recipe.RecipeIconPath = iconVal.String?.Trim() ?? string.Empty;
                 }
 
                 var iconSizeVal = table.Get("icon_size");
-                if (iconSizeVal.Type == DataType.Number) recipe.IconSize = iconSizeVal.Number.ToString();
+                if (iconSizeVal.Type == DataType.Number)
+                    recipe.IconSize = iconSizeVal.Number.ToString();
 
                 var enabledVal = table.Get("enabled");
                 recipe.Enabled = enabledVal.Type == DataType.Boolean ? enabledVal.Boolean : true;
 
-                // Формат difficulty (normal/expensive)
+                // === КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: поддержка normal/expensive ===
                 var normalVal = table.Get("normal");
                 var expensiveVal = table.Get("expensive");
 
                 if (normalVal.Type == DataType.Table || expensiveVal.Type == DataType.Table)
                 {
                     recipe.RecipeFormat = "difficulty";
-                    var primaryTable = normalVal.Type == DataType.Table ? normalVal.Table : expensiveVal.Table;
+                    
+                    // Приоритет: normal > expensive > общий
+                    Table? primaryTable = null;
+                    if (normalVal.Type == DataType.Table)
+                        primaryTable = normalVal.Table;
+                    else if (expensiveVal.Type == DataType.Table)
+                        primaryTable = expensiveVal.Table;
+
                     if (primaryTable != null)
                     {
+                        // Ингредиенты из primary
                         recipe.Ingredients = ConvertIngredients(primaryTable.Get("ingredients"));
+                        
+                        // Результаты из primary
                         ParseResultsFromTable(primaryTable, recipe);
+
+                        // Если в primary нет results/result, пробуем из корня таблицы
+                        if (recipe.Results.Count == 0 && recipe.Ingredients.Count == 0)
+                        {
+                            recipe.Ingredients = ConvertIngredients(table.Get("ingredients"));
+                            ParseResultsFromTable(table, recipe);
+                        }
                     }
                 }
                 else
                 {
+                    // Стандартный формат (без difficulty)
                     recipe.Ingredients = ConvertIngredients(table.Get("ingredients"));
                     ParseResultsFromTable(table, recipe);
                 }
+                // =================================================================
 
                 // Главный продукт
                 var mainProductVal = table.Get("main_product");
@@ -311,7 +556,6 @@ namespace RecipeExtractor.Services
                         .ThenBy(r => r.Amount).First().Name;
                 }
 
-                // Определяем иконку
                 DetermineRecipeIcon(recipe);
 
                 recipe.Properties = new Dictionary<string, object>();
@@ -321,7 +565,7 @@ namespace RecipeExtractor.Services
                     {
                         var key = kvp.Key.String?.Trim() ?? string.Empty;
                         if (!string.IsNullOrEmpty(key))
-                            recipe.Properties[key] = ConvertDynValueToObject(kvp.Value) ?? string.Empty;
+                            recipe.Properties[key] = ConvertDynValueToObject(kvp.Value);
                     }
                 }
 
@@ -367,36 +611,66 @@ namespace RecipeExtractor.Services
 
         private void DetermineRecipeIcon(Recipe recipe)
         {
-            // 1. Если у рецепта есть своя иконка
+            // 1. Своя иконка рецепта
             if (!string.IsNullOrEmpty(recipe.RecipeIconPath))
             {
                 recipe.ProductIconPath = recipe.RecipeIconPath;
                 recipe.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(recipe.RecipeIconPath);
                 recipe.IconFileName = $"{recipe.Name}.png";
-                return;
+
+                if (File.Exists(recipe.PhysicalIconPath)) return;
+
+                var byFile = _pathResolver.FindIconByFileName(recipe.RecipeIconPath);
+                if (byFile != null) { recipe.PhysicalIconPath = byFile; return; }
             }
 
-            // 2. Если есть main_product, берём его иконку
-            if (!string.IsNullOrEmpty(recipe.MainProduct) && _itemIconPaths.TryGetValue(recipe.MainProduct, out var iconPath))
+            // 2. Иконка главного продукта
+            if (!string.IsNullOrEmpty(recipe.MainProduct))
             {
-                recipe.ProductIconPath = iconPath;
-                recipe.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(iconPath);
+                if (_itemIconPaths.TryGetValue(recipe.MainProduct, out var gp))
+                {
+                    recipe.ProductIconPath = gp;
+                    recipe.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(gp);
+                }
+                else
+                {
+                    recipe.PhysicalIconPath = _pathResolver.FindIconByName(recipe.MainProduct);
+                }
                 recipe.IconFileName = $"{recipe.MainProduct}.png";
-                return;
+                if (File.Exists(recipe.PhysicalIconPath)) return;
+
+                var byFile = _pathResolver.FindIconByFileName(recipe.ProductIconPath);
+                if (byFile != null) { recipe.PhysicalIconPath = byFile; return; }
             }
 
-            // 3. Если один результат, берём его иконку
-            if (recipe.Results.Count == 1 && _itemIconPaths.TryGetValue(recipe.Results[0].Name, out var resIcon))
+            // 3. Единственный результат
+            if (recipe.Results.Count == 1)
             {
-                recipe.ProductIconPath = resIcon;
-                recipe.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(resIcon);
-                recipe.IconFileName = $"{recipe.Results[0].Name}.png";
-                return;
+                var rn = recipe.Results[0].Name;
+                if (_itemIconPaths.TryGetValue(rn, out var rp))
+                {
+                    recipe.ProductIconPath = rp;
+                    recipe.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(rp);
+                }
+                else
+                {
+                    recipe.PhysicalIconPath = _pathResolver.FindIconByName(rn);
+                }
+                recipe.IconFileName = $"{rn}.png";
+                if (File.Exists(recipe.PhysicalIconPath)) return;
+
+                var byFile = _pathResolver.FindIconByFileName(recipe.ProductIconPath);
+                if (byFile != null) { recipe.PhysicalIconPath = byFile; return; }
             }
 
-            // 4. Fallback
+            // 4. Последний fallback
+            recipe.PhysicalIconPath = _pathResolver.FindIconByName(recipe.Name);
             recipe.IconFileName = $"{recipe.Name}.png";
         }
+
+        // ================================================================
+        // ИНГРЕДИЕНТЫ И РЕЗУЛЬТАТЫ
+        // ================================================================
 
         private List<Ingredient> ConvertIngredients(DynValue luaIngredients)
         {
@@ -417,16 +691,19 @@ namespace RecipeExtractor.Services
                         {
                             ingredient.Name = nameVal.String?.Trim() ?? string.Empty;
                             var amountVal = itemTable.Get("amount");
-                            ingredient.Amount = amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
+                            ingredient.Amount = amountVal.Type != DataType.Nil
+                                ? Convert.ToInt32(amountVal.Number) : 1;
                             var typeVal = itemTable.Get("type");
-                            ingredient.Type = typeVal.Type != DataType.Nil ? (typeVal.String?.Trim() ?? "item") : "item";
+                            ingredient.Type = typeVal.Type != DataType.Nil
+                                ? (typeVal.String?.Trim() ?? "item") : "item";
                         }
                         else
                         {
                             var firstVal = itemTable.Get(DynValue.NewNumber(1));
                             var secondVal = itemTable.Get(DynValue.NewNumber(2));
                             if (firstVal.Type != DataType.Nil)
-                                ingredient.Name = firstVal.String?.Trim() ?? firstVal.ToString()?.Trim() ?? string.Empty;
+                                ingredient.Name = firstVal.String?.Trim()
+                                    ?? firstVal.ToString()?.Trim() ?? string.Empty;
                             if (secondVal.Type != DataType.Nil)
                                 ingredient.Amount = Convert.ToInt32(secondVal.Number);
                         }
@@ -458,18 +735,22 @@ namespace RecipeExtractor.Services
                         {
                             result.Name = nameVal.String?.Trim() ?? string.Empty;
                             var amountVal = itemTable.Get("amount");
-                            result.Amount = amountVal.Type != DataType.Nil ? Convert.ToInt32(amountVal.Number) : 1;
+                            result.Amount = amountVal.Type != DataType.Nil
+                                ? Convert.ToInt32(amountVal.Number) : 1;
                             var probVal = itemTable.Get("probability");
-                            result.Probability = probVal.Type != DataType.Nil ? Convert.ToDouble(probVal.Number) : 1.0;
+                            result.Probability = probVal.Type != DataType.Nil
+                                ? Convert.ToDouble(probVal.Number) : 1.0;
                             var typeVal = itemTable.Get("type");
-                            result.Type = typeVal.Type != DataType.Nil ? (typeVal.String?.Trim() ?? "item") : "item";
+                            result.Type = typeVal.Type != DataType.Nil
+                                ? (typeVal.String?.Trim() ?? "item") : "item";
                         }
                         else
                         {
                             var firstVal = itemTable.Get(DynValue.NewNumber(1));
                             var secondVal = itemTable.Get(DynValue.NewNumber(2));
                             if (firstVal.Type != DataType.Nil)
-                                result.Name = firstVal.String?.Trim() ?? firstVal.ToString()?.Trim() ?? string.Empty;
+                                result.Name = firstVal.String?.Trim()
+                                    ?? firstVal.ToString()?.Trim() ?? string.Empty;
                             if (secondVal.Type != DataType.Nil)
                                 result.Amount = Convert.ToInt32(secondVal.Number);
                             result.Probability = 1.0;
@@ -483,6 +764,138 @@ namespace RecipeExtractor.Services
             }
             return results;
         }
+
+        // ================================================================
+        // КОНВЕРТАЦИЯ ПРЕДМЕТОВ (item types)
+        // ================================================================
+
+        private Item? ConvertToItem(DynValue luaItem, string type)
+        {
+            try
+            {
+                if (luaItem.Type != DataType.Table) return null;
+                var table = luaItem.Table;
+                var item = new Item { Type = type };
+
+                var nameVal = table.Get("name");
+                if (nameVal.Type == DataType.String)
+                    item.Name = nameVal.String?.Trim() ?? string.Empty;
+
+                var iconVal = table.Get("icon");
+                if (iconVal.Type == DataType.String)
+                {
+                    item.IconPath = NormalizeGamePath(iconVal.String);
+                    item.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(item.IconPath);
+                }
+                else
+                {
+                    var iconsVal = table.Get("icons");
+                    if (iconsVal.Type == DataType.Table)
+                    {
+                        var firstIcon = iconsVal.Table.Get(DynValue.NewNumber(1));
+                        if (firstIcon.Type == DataType.Table)
+                        {
+                            var ip = firstIcon.Table.Get("icon");
+                            if (ip.Type == DataType.String)
+                            {
+                                item.IconPath = NormalizeGamePath(ip.String);
+                                item.PhysicalIconPath = _pathResolver.ResolveToPhysicalPath(item.IconPath);
+                            }
+                        }
+                    }
+                }
+
+                // Fallback цепочка для иконок
+                if (string.IsNullOrEmpty(item.PhysicalIconPath) || !File.Exists(item.PhysicalIconPath))
+                {
+                    var byFile = _pathResolver.FindIconByFileName(item.IconPath);
+                    if (byFile != null) item.PhysicalIconPath = byFile;
+                }
+                if (string.IsNullOrEmpty(item.PhysicalIconPath) || !File.Exists(item.PhysicalIconPath))
+                {
+                    var byName = _pathResolver.FindIconByName(item.Name);
+                    if (byName != null)
+                    {
+                        item.PhysicalIconPath = byName;
+                        if (string.IsNullOrEmpty(item.IconPath))
+                            item.IconPath = "__base__/graphics/icons/" + item.Name + ".png";
+                    }
+                }
+
+                var iconSizeVal = table.Get("icon_size");
+                if (iconSizeVal.Type == DataType.Number)
+                    item.IconSize = iconSizeVal.Number.ToString();
+
+                var stackSizeVal = table.Get("stack_size");
+                if (stackSizeVal.Type == DataType.Number)
+                    item.StackSize = Convert.ToInt32(stackSizeVal.Number);
+
+                var subgroupVal = table.Get("subgroup");
+                if (subgroupVal.Type == DataType.String)
+                    item.Subgroup = subgroupVal.String?.Trim() ?? string.Empty;
+
+                var orderVal = table.Get("order");
+                if (orderVal.Type == DataType.String)
+                    item.Order = orderVal.String?.Trim() ?? string.Empty;
+
+                item.Properties = new Dictionary<string, object>();
+                foreach (var kvp in table.Pairs)
+                {
+                    if (kvp.Key.Type == DataType.String)
+                    {
+                        var key = kvp.Key.String?.Trim() ?? string.Empty;
+                        if (!string.IsNullOrEmpty(key))
+                            item.Properties[key] = ConvertDynValueToObject(kvp.Value);
+                    }
+                }
+
+                return string.IsNullOrEmpty(item.Name) ? null : item;
+            }
+            catch { return null; }
+        }
+
+        // ================================================================
+        // НОРМАЛИЗАЦИЯ ПУТЕЙ (исправленная версия)
+        // ================================================================
+
+		private static string NormalizeGamePath(string? gamePath)
+		{
+			if (string.IsNullOrWhiteSpace(gamePath)) return string.Empty;
+			
+			var p = gamePath.Trim();
+
+			// Если путь УЖЕ содержит корректный префикс "__name__/", оставляем как есть
+			if (p.StartsWith("__") && p.IndexOf("__", 2) > 0)
+			{
+				return p;
+			}
+
+			// Лечим специфичные искажения MoonSharp
+			if (!p.Contains("__"))
+			{
+				p = Regex.Replace(p, @"^\s*_+\s*base\s*_+\s*/", "__base__/", RegexOptions.IgnoreCase);
+				p = Regex.Replace(p, @"^\s*_+\s*core\s*_+\s*/", "__core__/", RegexOptions.IgnoreCase);
+				
+				// Универсальный случай для модов: " modname /..." -> "__modname__/"
+				p = Regex.Replace(
+					p, 
+					@"^\s*([a-zA-Z][\w\-]*)\s*/", 
+					m => $"__{m.Groups[1].Value}__/"
+				);
+			}
+
+			// Удаляем лишние пробелы вокруг __...__ внутри строки
+			p = Regex.Replace(p, @"\s+(__[^/\s]+__)\s+", "$1");
+			
+			// Нормализуем двойные слеши
+			p = p.Replace("//", "/").Trim();
+
+			return p;
+		}
+
+        // ================================================================
+        // DYNVALUE → OBJECT
+        // ================================================================
 
         private object? ConvertDynValueToObject(DynValue val) => ConvertDynValueToObject(val, null);
 
@@ -542,11 +955,19 @@ namespace RecipeExtractor.Services
             catch { return val.Type.ToString(); }
         }
 
-        private class ModList { [JsonPropertyName("mods")] public List<ModEntry>? Mods { get; set; } }
+        private class ModList
+        {
+            [JsonPropertyName("mods")]
+            public List<ModEntry>? Mods { get; set; }
+        }
+
         private class ModEntry
         {
-            [JsonPropertyName("name")] public string Name { get; set; } = string.Empty;
-            [JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
+            [JsonPropertyName("name")]
+            public string Name { get; set; } = string.Empty;
+
+            [JsonPropertyName("enabled")]
+            public bool Enabled { get; set; } = true;
         }
     }
 }
